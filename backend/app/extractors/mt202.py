@@ -241,11 +241,23 @@ def parse_f32a(text: str) -> dict:
     Parse F32A block (or fallback to text) and return dict with:
     {'date_reference': iso-date or None, 'devise': 'USD'|'EUR'|..., 'montant': float or None}
     """
-    blk = get_field_block(text, 'F32A') or text or ""
+    # prefer explicit F32A / :32A: blocks; fallback to whole text
+    blk = get_field_block(text, 'F32A') or get_field_block(text, ':32A') or get_field_block(text, '32A') or text or ""
     blk_clean = re.sub(r'#.*?#', '', blk, flags=re.S)
     res = {'date_reference': None, 'devise': None, 'montant': None}
 
-    # date: try explicit Date: 251222 or a 6-digit token
+    # 1) Try SWIFT-style :32A:YYYYMMDDCCYAMOUNT (common in MT messages)
+    m_swift = re.search(r'(?i):?32A[:\s]*([0-9]{6})([A-Z]{3})([0-9][0-9\.,\s]+)', blk_clean)
+    if m_swift:
+        ymd = m_swift.group(1)
+        cur = m_swift.group(2).upper()
+        amt = m_swift.group(3)
+        res['date_reference'] = parse_date_YYMMDD(ymd)
+        res['devise'] = cur
+        res['montant'] = parse_amount(amt)
+        return res
+
+    # 2) date: try explicit Date: 251222 or a 6-digit token anywhere in block
     m_date = re.search(r'(?i)\bDate[:\s]*([0-9]{6})\b', blk_clean)
     if m_date:
         res['date_reference'] = parse_date_YYMMDD(m_date.group(1))
@@ -254,16 +266,7 @@ def parse_f32a(text: str) -> dict:
         if m_date2:
             res['date_reference'] = parse_date_YYMMDD(m_date2.group(1))
 
-    # currency: try "Currency:" or "Devise:" or any 3-letter token contextually near amount
-    m_cur = re.search(r'(?i)\b(?:Devise|Currency)[:\s\S]{0,40}?([A-Z]{3})\b', blk_clean)
-    if m_cur:
-        res['devise'] = m_cur.group(1).upper()
-    else:
-        m_cur2 = re.search(r'\b([A-Z]{3})\b', blk_clean)
-        if m_cur2:
-            res['devise'] = m_cur2.group(1).upper()
-
-    # amount: prefer explicit "Montant|Amount" line
+    # 3) amount: prefer explicit "Montant|Amount" line, otherwise pick longest numeric token
     candidate = None
     m_line = re.search(r'(?im)^\s*(?:Montant|Amount)\s*[:\-]\s*(.*)$', blk_clean, flags=re.M)
     if m_line:
@@ -273,13 +276,31 @@ def parse_f32a(text: str) -> dict:
             def digits_len(s): return len(re.sub(r'[^0-9]', '', s))
             candidate = max(nums, key=digits_len)
     if not candidate:
-        # fallback: pick the longest numeric-looking token in block
         nums_all = re.findall(r'([0-9]+(?:[.,\s][0-9]{1,3})*(?:[.,][0-9]{1,2})?)', blk_clean)
         if nums_all:
             def digits_len(s): return len(re.sub(r'[^0-9]', '', s))
             candidate = max(nums_all, key=digits_len)
     if candidate:
         res['montant'] = parse_amount(candidate)
+
+        # 4) currency: try explicit "Currency:" or "Devise:" near the amount
+        m_cur = re.search(r'(?i)\b(?:Devise|Currency)[:\s]{0,40}([A-Z]{3})\b', blk_clean)
+        if m_cur:
+            res['devise'] = m_cur.group(1).upper()
+        else:
+            # look for a 3-letter code close to the chosen amount token
+            pos = blk_clean.find(candidate)
+            if pos >= 0:
+                window = blk_clean[max(0, pos - 40): pos + len(candidate) + 40]
+                m_near = re.search(r'\b([A-Z]{3})\b', window)
+                if m_near:
+                    res['devise'] = m_near.group(1).upper()
+            # last-resort: any isolated 3-letter uppercase token in block
+            if not res['devise']:
+                m_cur2 = re.search(r'\b([A-Z]{3})\b', blk_clean)
+                if m_cur2:
+                    res['devise'] = m_cur2.group(1).upper()
+
     return res
 
 def extract_receiver_bic(text: str) -> Optional[str]:
