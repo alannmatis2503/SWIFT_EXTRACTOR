@@ -1,12 +1,24 @@
+# Python
 venv/
 __pycache__/
 *.pyc
-node_modules/
-dist/
-build/
-.DS_Store
+*.pyo
 .env
-data/raw/
-output/
-logs/
-*.bak.*
+
+# Build / packaging
+build/
+dist/
+*.egg-info
+
+# Archives / large outputs
+*.zip
+*.tar.gz
+
+# Editors / IDEs
+.vscode/
+.idea/
+
+# Others
+*.log
+*.sqlite3
+*.db
