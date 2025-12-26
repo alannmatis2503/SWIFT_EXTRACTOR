@@ -20,9 +20,22 @@ from backend.app.extractors.mt202 import (
 from backend.app.extractors.bic_utils import get_donneur_from_f52  # NEW
 
 def parse_f32a_103(text: str) -> dict:
-    blk = get_field_block(text, 'F32A') or text
+    blk = get_field_block(text, 'F32A') or get_field_block(text, ':32A') or get_field_block(text, '32A') or text
     blk_clean = re.sub(r'#.*?#', '', blk, flags=re.S)
     result = {'date_reference': None, 'devise': None, 'montant': None}
+
+    # 1) Try SWIFT-style :32A:YYMMDDCCYAMOUNT
+    m_swift = re.search(r'(?i):?32A[:\s]*([0-9]{6})([A-Z]{3})([0-9][0-9\.,\s]+)', blk_clean)
+    if m_swift:
+        ymd = m_swift.group(1)
+        cur = m_swift.group(2).upper()
+        amt = m_swift.group(3)
+        result['date_reference'] = parse_date_YYMMDD(ymd)
+        result['devise'] = cur
+        result['montant'] = parse_amount(amt)
+        return result
+
+    # 2) date
     m_date = re.search(r'(?i)\bDate[:\s]*([0-9]{6})\b', blk_clean)
     if m_date:
         result['date_reference'] = parse_date_YYMMDD(m_date.group(1))
@@ -30,17 +43,8 @@ def parse_f32a_103(text: str) -> dict:
         m_date2 = re.search(r'(\d{6})', blk_clean)
         if m_date2:
             result['date_reference'] = parse_date_YYMMDD(m_date2.group(1))
-    m_cur = re.search(r'(?i)\bDevise[:\s]*([A-Z]{3})\b', blk_clean)
-    if m_cur:
-        result['devise'] = m_cur.group(1)
-    else:
-        m_cur2 = re.search(r'(?i)Currency[:\s\S]{0,80}?([A-Z]{3})\b', blk_clean)
-        if m_cur2:
-            result['devise'] = m_cur2.group(1)
-        else:
-            m_cur3 = re.search(r'\b([A-Z]{3})\b', blk_clean)
-            if m_cur3:
-                result['devise'] = m_cur3.group(1)
+
+    # 3) amount
     candidate = None
     m_line = re.search(r'(?im)^\s*(?:Montant|Amount)\s*[:\-]\s*(.*)$', blk_clean, flags=re.M)
     if m_line:
@@ -56,6 +60,22 @@ def parse_f32a_103(text: str) -> dict:
             candidate = max(nums_all, key=digits_len)
     if candidate:
         result['montant'] = parse_amount(candidate)
+
+        # 4) currency: try Devise/Currency near amount, else nearby 3-letter token, else any 3-letter token
+        m_cur = re.search(r'(?i)\b(?:Devise|Currency)[:\s]{0,40}([A-Z]{3})\b', blk_clean)
+        if m_cur:
+            result['devise'] = m_cur.group(1).upper()
+        else:
+            pos = blk_clean.find(candidate)
+            if pos >= 0:
+                window = blk_clean[max(0, pos - 40): pos + len(candidate) + 40]
+                m_near = re.search(r'\b([A-Z]{3})\b', window)
+                if m_near:
+                    result['devise'] = m_near.group(1).upper()
+            if not result['devise']:
+                m_cur2 = re.search(r'\b([A-Z]{3})\b', blk_clean)
+                if m_cur2:
+                    result['devise'] = m_cur2.group(1)
     return result
 
 def parse_f59_account(text: str) -> Optional[str]:
