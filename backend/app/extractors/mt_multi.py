@@ -160,6 +160,30 @@ def _detect_mt_type(block_text: str) -> Optional[str]:
     return None
 
 
+def _should_reject_mt103(row: Dict) -> bool:
+    """
+    RÈGLE 3: Pour MT103, rejeter si F53A, F54A ou F57A contient:
+    - "BANQUE DE FRANCE"
+    - "FW021083459"
+    """
+    if not row.get("type_MT", "").startswith("fin.103"):
+        return False
+    
+    forbidden_patterns = ["BANQUE DE FRANCE", "FW021083459"]
+    fields_to_check = ["f53a_raw", "f54a_raw", "f57a_raw"]
+    
+    for field_name in fields_to_check:
+        field_value = row.get(field_name)
+        if field_value:
+            field_upper = field_value.upper()
+            for pattern in forbidden_patterns:
+                if pattern.upper() in field_upper:
+                    logger.debug("mt_multi: MT103 rejeté - Pattern '%s' trouvé dans %s", pattern, field_name)
+                    return True  # Rejeter ce message
+    
+    return False  # Ne pas rejeter
+
+
 # ---------- postprocessing for 202/103: F52A -> CODE/Name ----------
 def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional[str] = None) -> Dict:
     """
@@ -234,11 +258,24 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
     blocks = _split_messages(text)
     multi = len(blocks) > 1
     rows: List[Dict] = []
+    
+    # RÈGLE 1: Types valides à accepter
+    VALID_BASE_TYPES = {'202', '103', '910'}
 
     for i, blk in enumerate(blocks, start=1):
         source_label = f"{pdf_path.name}#{i}" if multi else pdf_path.name
         mt_type_token = _detect_mt_type(blk)  # e.g. '202', '202.COV', '910'
         row: Optional[Dict] = None
+        
+        # RÈGLE 1: Filtrer par type valide (202, 103, 910 et variantes)
+        if mt_type_token:
+            base_type = mt_type_token.split('.')[0]  # Extraire '202' de '202.COV'
+            if base_type not in VALID_BASE_TYPES:
+                logger.debug("mt_multi: Message %s rejeté (type invalide: %s)", source_label, mt_type_token)
+                continue  # Passer au message suivant
+        else:
+            logger.debug("mt_multi: Message %s rejeté (type non détecté)", source_label)
+            continue  # Passer au message suivant
 
         try:
             if mt_type_token and mt_type_token.startswith('202'):
@@ -317,6 +354,18 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
                 row[k] = None
         if not row.get("source_pdf"):
             row["source_pdf"] = source_label
+
+        # RÈGLE 2: Pour MT910, filtrer si F52A == "BEACCMCX091"
+        if row.get("type_MT", "").startswith("fin.910"):
+            donneur = row.get("donneur_dordre")
+            if donneur == "BEACCMCX091":
+                logger.debug("mt_multi: Message %s rejeté (MT910 avec F52A=BEACCMCX091)", source_label)
+                continue  # Passer au message suivant (ne pas ajouter à rows)
+        
+        # RÈGLE 3: Pour MT103, rejeter si F53A/F54A/F57A contient patterns interdits
+        if _should_reject_mt103(row):
+            logger.debug("mt_multi: Message %s rejeté (MT103 avec champs interdits)", source_label)
+            continue  # Passer au message suivant (ne pas ajouter à rows)
 
         rows.append(row)
 
