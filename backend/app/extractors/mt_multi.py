@@ -270,6 +270,9 @@ def _extract_f52a_for_mt910(row: Dict, block_text: str, xlsx_path: Optional[str]
     For MT910: extract F52A (Beneficiary) to populate code_donneur_dordre and donneur_dordre.
     This replaces the original receiver-based extraction with a proper F52A extraction.
     Follows the same logic as MT202/103 F52A processing.
+    
+    For MT910, F52A is BOTH donneur_dordre AND beneficiaire (they are the same).
+    Also retrieves country code from BIC mapping.
     """
     try:
         f52_block = get_field_block(block_text, 'F52A')
@@ -315,8 +318,15 @@ def _extract_f52a_for_mt910(row: Dict, block_text: str, xlsx_path: Optional[str]
         row["code_donneur_dordre"] = code_only
         row["donneur_dordre"] = name_only if name_only else code_only
         row["institution_name"] = name_only if name_only else code_only
+        
+        # For MT910: beneficiaire is the same as donneur_dordre (F52A is both donor and beneficiary)
+        row["beneficiaire"] = row["donneur_dordre"]
+        
         if not row.get("code_banque"):
             row["code_banque"] = code_only
+        
+        # Fill country from BIC code for MT910
+        row = _fill_country_from_code(row, xlsx_path=xlsx_path)
     
     return row
 
