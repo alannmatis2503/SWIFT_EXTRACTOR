@@ -558,47 +558,7 @@ def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
             r.get("source_pdf")
         ])
 
-    # create per-file sheets (key/value)
-    used_names = set()
-    for r in rows:
-        base = r.get("source_pdf", "sheet")
-        title = _sanitize_sheet_title(str(base))
-        original = title
-        i = 1
-        while title in used_names or title in wb.sheetnames:
-            suffix = f"_{i}"
-            max_base_len = 31 - len(suffix)
-            title = (original[:max_base_len] + suffix) if len(original) > max_base_len else (original + suffix)
-            i += 1
-        used_names.add(title)
-        ws = wb.create_sheet(title=title)
-
-        ordered_keys = [
-            "code_banque", "date_reference", "reference", "type_MT", "pays_iso3",
-            "code_donneur_dordre", "donneur_dordre", "institution_name", "beneficiaire", "montant", "devise", "source_pdf"
-        ]
-        written = set()
-        for k in ordered_keys:
-            if k in r:
-                label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else k))
-                ws.append([label, r.get(k)])
-                written.add(k)
-        for k, v in r.items():
-            if k in written:
-                continue
-            label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else k))
-            ws.append([label, v])
-
-        # adjust column widths heuristically
-        try:
-            max_len_col1 = max((len(str(row[0])) for row in ws.values if row[0] is not None), default=10)
-            max_len_col2 = max((len(str(row[1])) for row in ws.values if len(row) > 1 and row[1] is not None), default=10)
-            ws.column_dimensions[get_column_letter(1)].width = min(60, max(12, max_len_col1 + 2))
-            ws.column_dimensions[get_column_letter(2)].width = min(80, max(12, max_len_col2 + 8))
-        except Exception:
-            pass
-
-    # Add per-country summary sheets (BEFORE final save)
+    # Add per-country summary sheets (right after main summary, before per-file sheets)
     countries = {}
     for r in rows:
         country = r.get("pays_iso3")
@@ -647,8 +607,50 @@ def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
                 pass
         except Exception as e:
             logger.debug("Failed to create country sheet for %s: %s", country_code, e)
-    
+
+    # create per-file sheets (key/value) - AFTER country summaries
+    used_names = set()
+    for r in rows:
+        base = r.get("source_pdf", "sheet")
+        title = _sanitize_sheet_title(str(base))
+        original = title
+        i = 1
+        while title in used_names or title in wb.sheetnames:
+            suffix = f"_{i}"
+            max_base_len = 31 - len(suffix)
+            title = (original[:max_base_len] + suffix) if len(original) > max_base_len else (original + suffix)
+            i += 1
+        used_names.add(title)
+        ws = wb.create_sheet(title=title)
+
+        ordered_keys = [
+            "code_banque", "date_reference", "reference", "type_MT", "pays_iso3",
+            "code_donneur_dordre", "donneur_dordre", "institution_name", "beneficiaire", "montant", "devise", "source_pdf"
+        ]
+        written = set()
+        for k in ordered_keys:
+            if k in r:
+                label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else k))
+                ws.append([label, r.get(k)])
+                written.add(k)
+        for k, v in r.items():
+            if k in written:
+                continue
+            label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else k))
+            ws.append([label, v])
+
+        # adjust column widths heuristically
+        try:
+            max_len_col1 = max((len(str(row[0])) for row in ws.values if row[0] is not None), default=10)
+            max_len_col2 = max((len(str(row[1])) for row in ws.values if len(row) > 1 and row[1] is not None), default=10)
+            ws.column_dimensions[get_column_letter(1)].width = min(60, max(12, max_len_col1 + 2))
+            ws.column_dimensions[get_column_letter(2)].width = min(80, max(12, max_len_col2 + 8))
+        except Exception:
+            pass
+
     # Single final save after all sheets are created
     wb.save(out_path)
-    logger.info("Workbook created with country sheets: %s", out_path)    
+    logger.info("Workbook created with country sheets: %s", out_path)
+    return out_path
+
     return out_path
