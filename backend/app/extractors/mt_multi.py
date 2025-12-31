@@ -385,7 +385,12 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
     VALID_BASE_TYPES = {'202', '103', '910'}
 
     for i, blk in enumerate(blocks, start=1):
-        source_label = f"{pdf_path.name}#{i}" if multi else pdf_path.name
+        # Format: "voir message N°X du fichier filename.pdf" (multi) or just "filename.pdf" (single)
+        if multi:
+            source_label = f"voir message N°{i} du fichier {pdf_path.name}"
+        else:
+            source_label = pdf_path.name
+        
         mt_type_token = _detect_mt_type(blk)  # e.g. '202', '202.COV', '910'
         row: Optional[Dict] = None
         
