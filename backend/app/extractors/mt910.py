@@ -262,8 +262,8 @@ def _extract_from_text(text: str, source: str = None) -> dict:
             except Exception:
                 pass
 
-    # 4) country detection
-    row["pays_iso3"] = detect_country_from_text(text)
+    # 4) country detection will be done from BIC mapping in mt_multi post-processing
+    # row["pays_iso3"] = detect_country_from_text(text)  # removed: use BIC mapping only
 
     # normalization: uppercase currency
     if row.get("devise"):

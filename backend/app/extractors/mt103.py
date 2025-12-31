@@ -181,8 +181,8 @@ def extract_from_text(text: str, source: str = None) -> dict:
     # bénéficiaire
     row["beneficiaire"] = parse_f59_account(text)
 
-    # country detection
-    row["pays_iso3"] = detect_country_from_text(text)
+    # country detection will be done from BIC mapping in mt_multi post-processing
+    # row["pays_iso3"] = detect_country_from_text(text)  # removed: use BIC mapping only
     
     # Extract intermediary fields for filtering (Règle 3)
     # F53A: Sender's Correspondent
