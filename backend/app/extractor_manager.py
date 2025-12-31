@@ -650,4 +650,5 @@ def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
     
     # Single final save after all sheets are created
     wb.save(out_path)
-    logger.info("Workbook created with country sheets: %s", out_path)
+    logger.info("Workbook created with country sheets: %s", out_path)    
+    return out_path
