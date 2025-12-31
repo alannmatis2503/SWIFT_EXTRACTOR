@@ -268,3 +268,65 @@ def map_code_to_country(code: str, xlsx_path: Optional[str] = None) -> Optional[
     if _BIC_COUNTRY_MAP and key8 in _BIC_COUNTRY_MAP:
         return _BIC_COUNTRY_MAP[key8]
     return None
+
+
+def add_bic_code_to_xlsx(code: str, name: str, country: str, xlsx_path: Optional[str] = None) -> bool:
+    """
+    Add a new BIC code entry to the Excel file.
+    
+    Args:
+        code: BIC code (8-11 chars)
+        name: Bank name
+        country: Country ISO3 code
+        xlsx_path: Optional custom path to bic_codes.xlsx
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        from openpyxl import load_workbook
+    except Exception:
+        logger.error("openpyxl required for add_bic_code_to_xlsx")
+        return False
+    
+    fp = Path(xlsx_path) if xlsx_path else Path("data/bic_codes.xlsx")
+    
+    if not fp.exists():
+        logger.error("File not found: %s", fp)
+        return False
+    
+    try:
+        # Load workbook
+        wb = load_workbook(fp)
+        ws = wb.active
+        
+        # Append new row (Noms, Nom abrégé, Code BIC, Pays, ...)
+        ws.append([
+            name,                           # Noms
+            "",                             # Nom abrégé (optional)
+            code.upper(),                   # Code BIC
+            country.upper(),                # Pays
+            "",                             # Compte de règlement
+            "Actif",                        # Statut
+            "",                             # Type de participation
+            "",                             # Type d'institution
+            "",                             # Mode de connexion
+            ""                              # Heure de modification
+        ])
+        
+        # Save workbook
+        wb.save(fp)
+        
+        # Clear caches so next load picks up new data
+        global _BIC_MAP_CACHE, _BIC_FULLKEY_MAP, _BIC_COUNTRY_MAP
+        _BIC_MAP_CACHE = None
+        _BIC_FULLKEY_MAP = None
+        _BIC_COUNTRY_MAP = None
+        load_bic_mapping.cache_clear()
+        
+        logger.info("Added BIC code: %s (%s) - %s", code, name, country)
+        return True
+    
+    except Exception as e:
+        logger.exception("Failed to add BIC code to %s: %s", fp, e)
+        return False

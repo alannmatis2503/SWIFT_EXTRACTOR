@@ -89,6 +89,8 @@ if run_button:
         tmp_dirs = []  # to cleanup later
         st.info(f"Lancement de l'extraction pour {total} fichier(s)...")
 
+        all_missing_codes = {"unmapped": set(), "empty": set()}
+
         for uf in uploaded_files:
             idx += 1
             st.write(f"Traitement : **{uf.name}** ({idx}/{total})")
@@ -102,8 +104,12 @@ if run_button:
                 continue
 
             try:
-                # extract_dispatch retourne toujours une LISTE de rows (1 ou plusieurs)
-                new_rows = extract_dispatch(tmp_path)
+                # extract_dispatch retourne (rows, missing_codes)
+                new_rows, missing_codes = extract_dispatch(tmp_path)
+
+                # Accumulate missing codes
+                all_missing_codes["unmapped"].update(missing_codes.get("unmapped", set()))
+                all_missing_codes["empty"].update(missing_codes.get("empty", set()))
 
                 # Normalisations/garanties : mêmes clés pour chaque row, et source_pdf bien renseigné
                 for r in new_rows:
@@ -180,6 +186,59 @@ if run_button:
 
             st.success("Extraction terminée — aperçu ci-dessous")
             st.dataframe(df, use_container_width=True)
+
+            # Display missing codes if any
+            if all_missing_codes["unmapped"] or all_missing_codes["empty"]:
+                st.markdown("---")
+                st.markdown("### 📋 Codes BIC manquants")
+                
+                col1, col2 = st.columns(2)
+                
+                if all_missing_codes["unmapped"]:
+                    with col1:
+                        st.warning(f"**{len(all_missing_codes['unmapped'])} codes non mappés**\n\n"
+                                   "Codes trouvés dans le PDF mais sans nom de banque mapping :")
+                        for code in sorted(all_missing_codes["unmapped"]):
+                            st.code(code)
+                
+                if all_missing_codes["empty"]:
+                    with col2:
+                        st.error(f"**{len(all_missing_codes['empty'])} codes vides**\n\n"
+                                 "Champs BIC complètement vides dans le PDF :")
+                        for code in sorted(all_missing_codes["empty"]):
+                            st.code(code)
+                
+                # Form to add missing BIC codes
+                st.markdown("#### ➕ Ajouter un nouveau code BIC")
+                st.info("Aidez-nous à améliorer la base de données en renseignant les codes manquants.")
+                
+                with st.form("add_bic_form"):
+                    code = st.text_input("Code BIC (8-11 caractères)", max_chars=11)
+                    name = st.text_input("Nom de la banque", max_chars=100)
+                    country = st.text_input("Code ISO3 du pays (ex: CMR, GAB)", max_chars=3)
+                    
+                    submitted = st.form_submit_button("Ajouter le code")
+                    
+                    if submitted:
+                        if not code or not name or not country:
+                            st.error("Tous les champs sont obligatoires")
+                        else:
+                            try:
+                                from backend.app.extractors.bic_utils import add_bic_code_to_xlsx
+                                
+                                # Try to use relative path that works in Streamlit
+                                bic_file = Path("data/bic_codes.xlsx")
+                                if not bic_file.exists():
+                                    # Fallback to absolute path in repo
+                                    bic_file = ROOT / "data" / "bic_codes.xlsx"
+                                
+                                add_bic_code_to_xlsx(code.upper(), name, country.upper(), str(bic_file))
+                                st.success(f"✅ Code **{code.upper()}** ajouté avec succès à la base de données !")
+                                st.info("Le code sera disponible pour les prochaines extractions.")
+                            except Exception as e:
+                                st.error(f"Erreur lors de l'ajout du code : {e}")
+                
+                st.markdown("---")
 
             # Ensure backward-compatibility: create_workbook expects 'institution_name'
             for r in rows:
