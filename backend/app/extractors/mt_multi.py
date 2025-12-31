@@ -265,6 +265,62 @@ def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional
     return row
 
 
+def _extract_f52a_for_mt910(row: Dict, block_text: str, xlsx_path: Optional[str] = None) -> Dict:
+    """
+    For MT910: extract F52A (Beneficiary) to populate code_donneur_dordre and donneur_dordre.
+    This replaces the original receiver-based extraction with a proper F52A extraction.
+    Follows the same logic as MT202/103 F52A processing.
+    """
+    try:
+        f52_block = get_field_block(block_text, 'F52A')
+    except Exception:
+        f52_block = None
+
+    code_name = None
+    code_only = None
+
+    if HAS_BIC_UTILS:
+        try:
+            # bic_utils.get_donneur_from_f52 returns "CODE/Name" or CODE or None
+            code_name = bic_utils.get_donneur_from_f52(f52_block, message_text=block_text, xlsx_path=xlsx_path)
+        except Exception as e:
+            logger.debug("mt_multi: bic_utils.get_donneur_from_f52 error in MT910: %s", e)
+            code_name = None
+
+    if not code_name:
+        # fallback naive search near label if bic_utils absent or returned None
+        m_label = re.search(r'(?i)(?:IdentifierCode|Identifier Code|Code d\'identifiant|Code d identifiant|Identifier code)\s*[:\-\s]*', block_text)
+        if m_label:
+            tail = block_text[m_label.end(): m_label.end() + 800]
+            m_tok = re.search(r'\b([A-Z0-9]{8,11})\b', tail, flags=re.I)
+            if m_tok:
+                code_only = m_tok.group(1).upper()
+                if HAS_BIC_UTILS:
+                    try:
+                        name = bic_utils.map_code_to_name(code_only, xlsx_path=xlsx_path)
+                    except Exception:
+                        name = None
+                    code_name = f"{code_only}/{name}" if name else code_only
+                else:
+                    code_name = code_only
+
+    if code_name:
+        # Extract code and name separately
+        if '/' in code_name:
+            code_only, name_only = code_name.split('/', 1)
+        else:
+            code_only = code_name
+            name_only = None
+        
+        row["code_donneur_dordre"] = code_only
+        row["donneur_dordre"] = name_only if name_only else code_only
+        row["institution_name"] = name_only if name_only else code_only
+        if not row.get("code_banque"):
+            row["code_banque"] = code_only
+    
+    return row
+
+
 def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) -> tuple[List[Dict], Dict[str, set]]:
     """
     Main entrypoint: read pdf_path, split into messages, dispatch to extractors.
@@ -400,6 +456,9 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
                     if code == "BEACCMCX091":
                         logger.debug("mt_multi: Message %s rejeté (MT910 avec F50A=BEACCMCX091)", source_label)
                         continue  # Passer au message suivant (ne pas ajouter à rows)
+            
+            # MT910: Extract F52A for beneficiary/donneur_dordre (after RULE 2 check)
+            row = _extract_f52a_for_mt910(row, blk, xlsx_path=bic_xlsx)
         
         # RÈGLE 3: Pour MT103, rejeter si F53A/F54A/F57A contient patterns interdits
         if _should_reject_mt103(row):
