@@ -355,12 +355,12 @@ def detect_message_type(text: str) -> Optional[str]:
     return None
 
 
-def extract_dispatch(pdf_path: Path) -> List[Dict]:
+def extract_dispatch(pdf_path: Path) -> tuple[List[Dict], Dict[str, set]]:
     """
     Dispatcher intelligent :
       - si le PDF contient plusieurs messages -> utilise mt_multi.extract_messages_from_pdf
       - sinon -> utilise extract_single (retourne [row])
-    Retourne toujours une LISTE de rows.
+    Retourne toujours : (liste de rows, dict de codes manquants)
     """
     p = Path(pdf_path)
     # quick text extraction using existing helper
@@ -380,13 +380,15 @@ def extract_dispatch(pdf_path: Path) -> List[Dict]:
             logger.warning("extract_dispatch: quick pdfplumber fallback failed for %s: %s", p.name, e2)
             text = ""
 
+    missing_codes: Dict[str, set] = {"unmapped": set(), "empty": set()}
+
     # If multi-message extractor available, use its split logic to decide
     if HAS_MT_MULTI and mt_multi_module:
         try:
             blocks = mt_multi_module._split_messages(text)
             if blocks and len(blocks) > 1:
                 logger.info("%s: detected %d messages (using mt_multi).", p.name, len(blocks))
-                rows = mt_multi_module.extract_messages_from_pdf(p)
+                rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p)
                 # ensure backward compatibility: set institution_name from donneur_dordre if missing
                 for r in rows:
                     if "institution_name" not in r or not r.get("institution_name"):
@@ -394,14 +396,14 @@ def extract_dispatch(pdf_path: Path) -> List[Dict]:
                     for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf"]:
                         if k not in r:
                             r[k] = None
-                return rows
+                return rows, missing_codes
         except Exception as e:
             logger.exception("extract_dispatch: mt_multi detection/extraction failed for %s: %s", p.name, e)
             # fall through to single extractor
 
     # fallback: treat as single message
     single_row = extract_single(p)
-    return [single_row]
+    return [single_row], missing_codes
 
 
 def _ensure_minimal_row(p: Path, mt_type: Optional[str] = None) -> Dict:
@@ -598,4 +600,56 @@ def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
 
     wb.save(out_path)
     logger.info("Workbook created: %s", out_path)
-    return out_path
+    
+    # Add per-country summary sheets
+    countries = {}
+    for r in rows:
+        country = r.get("pays_iso3")
+        if country:
+            if country not in countries:
+                countries[country] = []
+            countries[country].append(r)
+    
+    # Create a sheet for each country with summary data
+    for country_code in sorted(countries.keys()):
+        try:
+            country_rows = countries[country_code]
+            country_sheet = wb.create_sheet(title=country_code)
+            
+            # Same headers as summary
+            country_sheet.append(display_headers)
+            
+            # Add rows for this country
+            for r in country_rows:
+                code_donneur = r.get("code_donneur_dordre") or None
+                donneur = r.get("donneur_dordre") or None
+                if not donneur and "institution_name" in r:
+                    donneur = r.get("institution_name")
+                beneficiaire = r.get("beneficiaire") or None
+                country_sheet.append([
+                    r.get("code_banque"),
+                    r.get("date_reference"),
+                    r.get("reference"),
+                    r.get("type_MT"),
+                    r.get("pays_iso3"),
+                    code_donneur,
+                    donneur,
+                    beneficiaire,
+                    r.get("montant"),
+                    r.get("devise"),
+                    r.get("source_pdf")
+                ])
+            
+            # Adjust column widths
+            try:
+                max_len_col1 = max((len(str(row[0])) for row in country_sheet.values if row[0] is not None), default=10)
+                max_len_col2 = max((len(str(row[1])) for row in country_sheet.values if len(row) > 1 and row[1] is not None), default=10)
+                country_sheet.column_dimensions[get_column_letter(1)].width = min(60, max(12, max_len_col1 + 2))
+                country_sheet.column_dimensions[get_column_letter(2)].width = min(80, max(12, max_len_col2 + 8))
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug("Failed to create country sheet for %s: %s", country_code, e)
+    
+    wb.save(out_path)
+    logger.info("Workbook created with country sheets: %s", out_path)

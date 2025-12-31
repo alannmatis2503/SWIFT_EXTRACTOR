@@ -265,10 +265,13 @@ def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional
     return row
 
 
-def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) -> List[Dict]:
+def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) -> tuple[List[Dict], Dict[str, set]]:
     """
     Main entrypoint: read pdf_path, split into messages, dispatch to extractors.
     bic_xlsx: optional path forwarded to bic_utils when used in postprocessing.
+    
+    Returns:
+        tuple: (list of extracted rows, dict with 'unmapped' and 'empty' code sets)
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
@@ -285,6 +288,10 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
     blocks = _split_messages(text)
     multi = len(blocks) > 1
     rows: List[Dict] = []
+    missing_codes: Dict[str, set] = {
+        "unmapped": set(),  # codes found but no name mapping
+        "empty": set()      # no code found at all
+    }
     
     # RÈGLE 1: Types valides à accepter
     VALID_BASE_TYPES = {'202', '103', '910'}
@@ -402,9 +409,19 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
         # Post-traitement: remplir pays_iso3 depuis code_donneur_dordre si absent
         row = _fill_country_from_code(row, xlsx_path=bic_xlsx)
 
+        # Track missing codes for user feedback
+        code = row.get("code_donneur_dordre")
+        name = row.get("donneur_dordre")
+        if not code:
+            # Case 2: No code found at all
+            missing_codes["empty"].add("(vide)")
+        elif name == code:
+            # Case 1: Code found but no name mapping (name == code means no mapping)
+            missing_codes["unmapped"].add(code)
+
         rows.append(row)
 
-    return rows
+    return rows, missing_codes
 
 
 # quick CLI for manual test
