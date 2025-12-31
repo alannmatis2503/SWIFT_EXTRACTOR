@@ -161,7 +161,7 @@ if run_button:
                     "reference": r.get("reference"),
                     "type_MT": r.get("type_MT"),
                     "pays_iso3": r.get("pays_iso3"),
-                    # use the new key extracted by mt_multi
+                    "Code du donneur d'ordre": r.get("code_donneur_dordre"),
                     "donneur d'ordre": r.get("donneur_dordre"),
                     "Bénéficiaire": r.get("beneficiaire"),
                     "montant": r.get("montant"),
