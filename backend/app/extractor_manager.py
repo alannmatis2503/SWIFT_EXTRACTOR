@@ -524,6 +524,7 @@ def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
         "reference",
         "type_MT",
         "pays_iso3",
+        "Code du donneur d'ordre",
         "donneur d'ordre",
         "Bénéficiaire",
         "montant",
@@ -534,8 +535,12 @@ def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
 
     # write summary rows (map internal keys -> display)
     for r in rows:
-        # prefer institution_name, else new key donneur_dordre
-        donneur = r.get("institution_name") or r.get("donneur_dordre") or r.get("donneur d'ordre") or None
+        # use code_donneur_dordre and donneur_dordre separately
+        code_donneur = r.get("code_donneur_dordre") or None
+        donneur = r.get("donneur_dordre") or None
+        # fallback: use institution_name if the new structure not present
+        if not donneur and "institution_name" in r:
+            donneur = r.get("institution_name")
         beneficiaire = r.get("beneficiaire") or None
         summary.append([
             r.get("code_banque"),
@@ -543,6 +548,7 @@ def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
             r.get("reference"),
             r.get("type_MT"),
             r.get("pays_iso3"),
+            code_donneur,
             donneur,
             beneficiaire,
             r.get("montant"),
@@ -567,18 +573,18 @@ def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
 
         ordered_keys = [
             "code_banque", "date_reference", "reference", "type_MT", "pays_iso3",
-            "institution_name", "beneficiaire", "montant", "devise", "source_pdf"
+            "code_donneur_dordre", "donneur_dordre", "institution_name", "beneficiaire", "montant", "devise", "source_pdf"
         ]
         written = set()
         for k in ordered_keys:
             if k in r:
-                label = "donneur d'ordre" if k == "institution_name" else ("Bénéficiaire" if k == "beneficiaire" else k)
+                label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else k))
                 ws.append([label, r.get(k)])
                 written.add(k)
         for k, v in r.items():
             if k in written:
                 continue
-            label = "donneur d'ordre" if k == "institution_name" else ("Bénéficiaire" if k == "beneficiaire" else k)
+            label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else k))
             ws.append([label, v])
 
         # adjust column widths heuristically

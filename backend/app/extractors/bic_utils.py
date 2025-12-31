@@ -32,6 +32,7 @@ _FALLBACK_TOKEN_RE = re.compile(r'\b([A-Z0-9]{8,11})\b', re.I)
 # module-level cache
 _BIC_MAP_CACHE: Optional[Dict[str, str]] = None
 _BIC_FULLKEY_MAP: Optional[Dict[str, str]] = None
+_BIC_COUNTRY_MAP: Optional[Dict[str, str]] = None  # Code BIC -> Pays (ISO3)
 
 
 def _find_strict_identifier_in_f52(f52_text: str) -> Optional[str]:
@@ -85,22 +86,24 @@ def _find_strict_identifier_in_f52(f52_text: str) -> Optional[str]:
 def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
     """
     Load the BIC mapping Excel file and return a dict mapping 8-char key -> bank name.
-    Also populate a full-key map for 11-char exact matches.
+    Also populate a full-key map for 11-char exact matches and a country map.
     Default path: data/bic_codes.xlsx
 
     Expected columns: try to detect columns for code and name (flexible).
     """
-    global _BIC_MAP_CACHE, _BIC_FULLKEY_MAP
+    global _BIC_MAP_CACHE, _BIC_FULLKEY_MAP, _BIC_COUNTRY_MAP
     if _BIC_MAP_CACHE is not None and _BIC_FULLKEY_MAP is not None:
         return _BIC_MAP_CACHE
 
     fp = Path(xlsx_path) if xlsx_path else Path("data/bic_codes.xlsx")
     mapping: Dict[str, str] = {}
     mapping_full: Dict[str, str] = {}
+    country_map: Dict[str, str] = {}
 
     if not fp.exists():
         _BIC_MAP_CACHE = {}
         _BIC_FULLKEY_MAP = {}
+        _BIC_COUNTRY_MAP = {}
         return _BIC_MAP_CACHE
 
     df = pd.read_excel(fp, dtype=str)
@@ -110,6 +113,7 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
     # heuristics to find code and name columns
     code_col = None
     name_col = None
+    country_col = None
     col_upper = [c.strip().upper() for c in cols]
 
     # common name candidates
@@ -136,9 +140,16 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
                 name_col = c
                 break
 
+    # look for country column
+    for i, cu in enumerate(col_upper):
+        if cu in ("PAYS", "COUNTRY", "COUNTRY_CODE", "ISO3", "ISO_COUNTRY"):
+            country_col = cols[i]
+            break
+
     if not code_col:
         _BIC_MAP_CACHE = {}
         _BIC_FULLKEY_MAP = {}
+        _BIC_COUNTRY_MAP = {}
         return _BIC_MAP_CACHE
 
     # build mapping
@@ -150,6 +161,10 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
         raw_name = ""
         if name_col:
             raw_name = str(row.get(name_col) or "").strip()
+        raw_country = ""
+        if country_col:
+            raw_country = str(row.get(country_col) or "").strip().upper()
+        
         # map first 8 chars -> name
         key8 = raw_code[:8]
         if key8:
@@ -158,12 +173,17 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
             else:
                 # if no name column found, use the raw_code as fallback value (rare)
                 mapping.setdefault(key8, raw_code)
+            # also store country for this 8-char key
+            if raw_country:
+                country_map[key8] = raw_country
+        
         # also keep full mapping for exact 11-char keys (useful for BEACCMCX100)
         if len(raw_code) >= 8:
             mapping_full[raw_code] = raw_name or mapping.get(raw_code[:8], "")
 
     _BIC_MAP_CACHE = mapping
     _BIC_FULLKEY_MAP = mapping_full
+    _BIC_COUNTRY_MAP = country_map
     return _BIC_MAP_CACHE
 
 
@@ -231,3 +251,20 @@ def get_donneur_from_f52(f52_text: Optional[str], message_text: Optional[str] = 
     if name:
         return f"{code}/{name}"
     return code
+
+
+def map_code_to_country(code: str, xlsx_path: Optional[str] = None) -> Optional[str]:
+    """
+    Map a raw code (8..11 chars) to country ISO3 code using loaded mapping.
+    Uses the first 8 characters of the code to look up the country.
+    Returns the country ISO3 code (e.g., "CMR") or None if not found.
+    """
+    if not code:
+        return None
+    _ = load_bic_mapping(xlsx_path=xlsx_path)  # populate caches
+    global _BIC_COUNTRY_MAP
+    code_u = code.strip().upper()
+    key8 = code_u[:8]
+    if _BIC_COUNTRY_MAP and key8 in _BIC_COUNTRY_MAP:
+        return _BIC_COUNTRY_MAP[key8]
+    return None

@@ -184,13 +184,36 @@ def _should_reject_mt103(row: Dict) -> bool:
     return False  # Ne pas rejeter
 
 
+def _fill_country_from_code(row: Dict, xlsx_path: Optional[str] = None) -> Dict:
+    """
+    If pays_iso3 is empty and code_donneur_dordre is present, try to fill pays_iso3
+    by looking up the code in the BIC mapping.
+    """
+    if row.get("pays_iso3"):
+        # Already has a country, don't override
+        return row
+    
+    code = row.get("code_donneur_dordre")
+    if not code or not HAS_BIC_UTILS:
+        return row
+    
+    try:
+        country = bic_utils.map_code_to_country(code, xlsx_path=xlsx_path)
+        if country:
+            row["pays_iso3"] = country
+    except Exception as e:
+        logger.debug("mt_multi: map_code_to_country failed for code %s: %s", code, e)
+    
+    return row
+
+
 # ---------- postprocessing for 202/103: F52A -> CODE/Name ----------
 def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional[str] = None) -> Dict:
     """
     For MT202 / MT103 and variants (like 202.COV) : attempt to extract a strict Identifier
     token from F52A (or message text) using bic_utils.get_donneur_from_f52 (if available).
-    If a CODE or CODE/Name is found, fill row['donneur_dordre'] and row['institution_name'] and
-    set row['code_banque'] if missing.
+    If a CODE or CODE/Name is found, fill row['code_donneur_dordre'] (the code) and 
+    row['donneur_dordre'] (the name only).
     """
     try:
         f52_block = get_field_block(block_text, 'F52A')
@@ -226,15 +249,19 @@ def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional
                     code_name = code_only
 
     if code_name:
-        # store
+        # Extract code and name separately
         if '/' in code_name:
-            code_only = code_name.split('/', 1)[0]
+            code_only, name_only = code_name.split('/', 1)
         else:
             code_only = code_name
-        row["donneur_dordre"] = code_name
-        row["institution_name"] = code_name
+            name_only = None
+        
+        row["code_donneur_dordre"] = code_only
+        row["donneur_dordre"] = name_only if name_only else code_only
+        row["institution_name"] = name_only if name_only else code_only
         if not row.get("code_banque"):
             row["code_banque"] = code_only
+    
     return row
 
 
@@ -348,24 +375,32 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
 
         # ensure expected keys present
         expected = ["type_MT","code_banque","sender_bic","receiver_bic","reference","date_reference",
-                    "devise","montant","donneur_dordre","beneficiaire","pays_iso3","source_pdf"]
+                    "devise","montant","code_donneur_dordre","donneur_dordre","beneficiaire","pays_iso3","source_pdf"]
         for k in expected:
             if k not in row:
                 row[k] = None
         if not row.get("source_pdf"):
             row["source_pdf"] = source_label
 
-        # RÈGLE 2: Pour MT910, filtrer si F52A == "BEACCMCX091"
+        # RÈGLE 2: Pour MT910, filtrer si F50A (Client donneur d'ordre) contient IdentifierCode == "BEACCMCX091"
         if row.get("type_MT", "").startswith("fin.910"):
-            donneur = row.get("donneur_dordre")
-            if donneur == "BEACCMCX091":
-                logger.debug("mt_multi: Message %s rejeté (MT910 avec F52A=BEACCMCX091)", source_label)
-                continue  # Passer au message suivant (ne pas ajouter à rows)
+            f50a_block = get_field_block(blk, 'F50A')
+            if f50a_block:
+                # Chercher le code d'identifiant dans F50A après la ligne "IdentifierCode: Code d'identifiant:"
+                m = re.search(r'(?i)IdentifierCode.*?Code d[\'`]identifiant:?\s+([A-Z0-9]{8,11})', f50a_block, re.DOTALL)
+                if m:
+                    code = m.group(1).strip().upper()
+                    if code == "BEACCMCX091":
+                        logger.debug("mt_multi: Message %s rejeté (MT910 avec F50A=BEACCMCX091)", source_label)
+                        continue  # Passer au message suivant (ne pas ajouter à rows)
         
         # RÈGLE 3: Pour MT103, rejeter si F53A/F54A/F57A contient patterns interdits
         if _should_reject_mt103(row):
             logger.debug("mt_multi: Message %s rejeté (MT103 avec champs interdits)", source_label)
             continue  # Passer au message suivant (ne pas ajouter à rows)
+
+        # Post-traitement: remplir pays_iso3 depuis code_donneur_dordre si absent
+        row = _fill_country_from_code(row, xlsx_path=bic_xlsx)
 
         rows.append(row)
 
