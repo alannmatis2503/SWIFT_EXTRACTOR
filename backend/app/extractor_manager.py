@@ -598,10 +598,7 @@ def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
         except Exception:
             pass
 
-    wb.save(out_path)
-    logger.info("Workbook created: %s", out_path)
-    
-    # Add per-country summary sheets
+    # Add per-country summary sheets (BEFORE final save)
     countries = {}
     for r in rows:
         country = r.get("pays_iso3")
@@ -651,5 +648,6 @@ def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
         except Exception as e:
             logger.debug("Failed to create country sheet for %s: %s", country_code, e)
     
+    # Single final save after all sheets are created
     wb.save(out_path)
     logger.info("Workbook created with country sheets: %s", out_path)
