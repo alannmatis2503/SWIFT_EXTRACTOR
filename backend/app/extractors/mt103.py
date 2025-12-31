@@ -216,3 +216,4 @@ if __name__ == "__main__":
         print("Usage: python mt103.py path/to/103.pdf")
         raise SystemExit(1)
     pprint(extract_for_mt103(sys.argv[1]))
+
