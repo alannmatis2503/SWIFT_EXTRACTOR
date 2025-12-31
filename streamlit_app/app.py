@@ -47,6 +47,12 @@ st.markdown(
 # File uploader (multiple)
 uploaded_files = st.file_uploader("Choisir des fichiers PDF", type="pdf", accept_multiple_files=True)
 
+# Date filter
+st.markdown("### 📅 Filtre par date")
+from datetime import date as date_type
+default_date = date_type.today()
+selected_date = st.date_input("Sélectionner une date de valeur", value=default_date)
+
 col1, col2 = st.columns([1, 1])
 with col1:
     save_mode = st.radio("Mode de sortie", ("Télécharger le workbook", "Enregistrer sur le serveur (output/tables)"))
@@ -157,6 +163,14 @@ if run_button:
 
         progress.empty()
 
+        # Filter rows by selected date
+        if selected_date:
+            selected_date_str = selected_date.strftime("%Y-%m-%d")
+            rows_filtered = [r for r in rows if r.get("date_reference") == selected_date_str]
+            if len(rows_filtered) < len(rows):
+                st.info(f"📅 Filtrage appliqué : {len(rows_filtered)} message(s) pour la date {selected_date_str} (sur {len(rows)} total)")
+            rows = rows_filtered
+        
         # assemble display DataFrame (map internal keys -> user-facing labels)
         if rows:
             display_rows = []
