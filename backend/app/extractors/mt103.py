@@ -178,8 +178,9 @@ def extract_from_text(text: str, source: str = None) -> dict:
     inst = parse_f52a_or_f50f_institution(text)
     row["donneur_dordre"] = inst
 
-    # bénéficiaire
-    row["beneficiaire"] = parse_f59_account(text)
+    # bénéficiaire: for MT103, same as MT910 - use F52A institution (donneur_dordre)
+    # not F59 account. If code not found in BIC map, will use code as fallback.
+    row["beneficiaire"] = inst
 
     # country detection will be done from BIC mapping in mt_multi post-processing
     # row["pays_iso3"] = detect_country_from_text(text)  # removed: use BIC mapping only
