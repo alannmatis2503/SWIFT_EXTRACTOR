@@ -207,6 +207,27 @@ def _fill_country_from_code(row: Dict, xlsx_path: Optional[str] = None) -> Dict:
     return row
 
 
+def _fill_country_from_code_force(row: Dict, xlsx_path: Optional[str] = None) -> Dict:
+    """
+    For MT910: FORCE fill pays_iso3 from BIC code, overriding any existing value.
+    This is necessary because detect_country_from_text may pick up false positives
+    from the document text. BIC mapping is authoritative.
+    """
+    code = row.get("code_donneur_dordre")
+    if not code or not HAS_BIC_UTILS:
+        return row
+    
+    try:
+        country = bic_utils.map_code_to_country(code, xlsx_path=xlsx_path)
+        if country:
+            row["pays_iso3"] = country  # FORCE override, don't check existing value
+    except Exception as e:
+        logger.debug("mt_multi: _fill_country_from_code_force failed for code %s: %s", code, e)
+    
+    return row
+
+
+
 # ---------- postprocessing for 202/103: F52A -> CODE/Name ----------
 def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional[str] = None) -> Dict:
     """
@@ -325,8 +346,9 @@ def _extract_f52a_for_mt910(row: Dict, block_text: str, xlsx_path: Optional[str]
         if not row.get("code_banque"):
             row["code_banque"] = code_only
         
-        # Fill country from BIC code for MT910
-        row = _fill_country_from_code(row, xlsx_path=xlsx_path)
+        # Fill country from BIC code for MT910 - FORCE override detect_country_from_text results
+        # BIC mapping is authoritative, not the heuristic text detection
+        row = _fill_country_from_code_force(row, xlsx_path=xlsx_path)
     
     return row
 
