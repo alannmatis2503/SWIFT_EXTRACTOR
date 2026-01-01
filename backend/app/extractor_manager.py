@@ -355,12 +355,16 @@ def detect_message_type(text: str) -> Optional[str]:
     return None
 
 
-def extract_dispatch(pdf_path: Path) -> tuple[List[Dict], Dict[str, set]]:
+def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[Dict], Dict[str, set]]:
     """
     Dispatcher intelligent :
       - si le PDF contient plusieurs messages -> utilise mt_multi.extract_messages_from_pdf
       - sinon -> utilise extract_single (retourne [row])
     Retourne toujours : (liste de rows, dict de codes manquants)
+    
+    Args:
+        pdf_path: Path to the PDF file
+        direction: "incoming" or "outgoing" - determines beneficiary extraction logic
     """
     p = Path(pdf_path)
     # quick text extraction using existing helper
@@ -388,7 +392,7 @@ def extract_dispatch(pdf_path: Path) -> tuple[List[Dict], Dict[str, set]]:
             blocks = mt_multi_module._split_messages(text)
             if blocks and len(blocks) > 1:
                 logger.info("%s: detected %d messages (using mt_multi).", p.name, len(blocks))
-                rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p)
+                rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction)
                 # ensure backward compatibility: set institution_name from donneur_dordre if missing
                 for r in rows:
                     if "institution_name" not in r or not r.get("institution_name"):
@@ -402,7 +406,7 @@ def extract_dispatch(pdf_path: Path) -> tuple[List[Dict], Dict[str, set]]:
             # fall through to single extractor
 
     # fallback: treat as single message
-    single_row = extract_single(p)
+    single_row = extract_single(p, direction=direction)
     return [single_row], missing_codes
 
 
@@ -422,11 +426,15 @@ def _ensure_minimal_row(p: Path, mt_type: Optional[str] = None) -> Dict:
     }
 
 
-def extract_single(pdf_path: Path) -> Dict:
+def extract_single(pdf_path: Path, direction: str = "incoming") -> Dict:
     """
     Dispatch extraction for a single pdf_path (Path or str).
     Returns a dict with fields (internal keys). The create_workbook function maps
     'institution_name' -> "donneur d'ordre" when writing the summary sheet.
+    
+    Args:
+        pdf_path: Path to the PDF file
+        direction: "incoming" or "outgoing" - determines beneficiary extraction logic
     """
     p = Path(pdf_path)
     if not p.exists():
@@ -465,7 +473,14 @@ def extract_single(pdf_path: Path) -> Dict:
         return row
 
     try:
-        row = extractor(p)
+        # Pass direction to extractor if it supports it
+        import inspect
+        sig = inspect.signature(extractor)
+        if 'direction' in sig.parameters:
+            row = extractor(p, direction=direction)
+        else:
+            row = extractor(p)
+            
         if not isinstance(row, dict):
             logger.error("%s: extractor returned non-dict result: %r", p.name, row)
             row = _ensure_minimal_row(p, mt_type=mt)
@@ -481,7 +496,7 @@ def extract_single(pdf_path: Path) -> Dict:
                 row["type_MT"] = f"fin.{mt}"
             if not row.get("source_pdf"):
                 row["source_pdf"] = p.name
-        logger.info("%s: extracted via MT%s", p.name, mt)
+        logger.info("%s: extracted via MT%s (direction: %s)", p.name, mt, direction)
         return row
     except Exception as e:
         logger.exception("Extraction failed for %s (MT%s): %s", p.name, mt, e)
@@ -503,17 +518,22 @@ def _sanitize_sheet_title(name: str, max_len: int = 31) -> str:
     return sanitized
 
 
-def create_workbook(rows: List[Dict], out_dir: Path) -> Path:
+def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming") -> Path:
     """
     Create an Excel workbook with:
       - a 'summary' sheet containing one row per extracted file (display headers in French)
       - one additional sheet per file with key/value pairs (debug-friendly)
     Returns the Path to the saved workbook.
+    
+    Args:
+        rows: List of extracted data dictionaries
+        out_dir: Output directory for the workbook
+        direction: "incoming" or "outgoing" - used in filename
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"swift_extraction_{ts}.xlsx"
+    out_path = out_dir / f"swift_extraction_{direction}_{ts}.xlsx"
 
     wb = Workbook()
     summary = wb.active

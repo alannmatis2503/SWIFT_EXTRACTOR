@@ -133,7 +133,7 @@ def _extract_from_text(text: str, source: str = None) -> dict:
     }
 
     # 0) reference: prefer header "Transaction Reference" (works cross-block) then :20:
-    m_tr = re.search(r'(?i)Transaction Reference\s*[:\s]*([A-Z0-9\-\_]+)', text)
+    m_tr = re.search(r'(?i)Transaction Reference\s*[:\s]*([A-Z0-9\-\_/]+)', text)
     if m_tr:
         row["reference"] = m_tr.group(1).strip()
 
