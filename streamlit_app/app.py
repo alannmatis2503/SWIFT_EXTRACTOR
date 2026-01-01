@@ -38,11 +38,26 @@ st.title("PDF SWIFT Extractor — Interface clic-clic")
 st.markdown(
     """
     **Mode d'emploi rapide**
+    - Sélectionnez le type de messages (entrants ou sortants)
     - Glisser-déposer un ou plusieurs fichiers PDF ci-dessous.
     - Cliquez sur **Extraire**. Les fichiers sont analysés localement.
     - Téléchargez le workbook Excel ou enregistrez-le sur le serveur.
     """
 )
+
+# Direction selector
+st.markdown("### 📨 Type de messages")
+direction = st.radio(
+    "Sélectionnez le type de messages à extraire",
+    ("incoming", "outgoing"),
+    format_func=lambda x: "📥 Messages Entrants (MT202, MT103, MT910)" if x == "incoming" else "📤 Messages Sortants (MT202, MT103, MT910)",
+    horizontal=True
+)
+
+if direction == "incoming":
+    st.info("**Messages entrants** : Pour les MT202, le bénéficiaire sera vide. Pour les MT910, le bénéficiaire sera identique au donneur d'ordre.")
+else:
+    st.info("**Messages sortants** : Pour les MT202, le bénéficiaire sera extrait depuis F58A. Pour les MT103, le bénéficiaire sera vide (à implémenter). Pour les MT910, le bénéficiaire sera identique au donneur d'ordre.")
 
 # File uploader (multiple)
 uploaded_files = st.file_uploader("Choisir des fichiers PDF", type="pdf", accept_multiple_files=True)
@@ -110,8 +125,8 @@ if run_button:
                 continue
 
             try:
-                # extract_dispatch retourne (rows, missing_codes)
-                new_rows, missing_codes = extract_dispatch(tmp_path)
+                # extract_dispatch retourne (rows, missing_codes) avec support du paramètre direction
+                new_rows, missing_codes = extract_dispatch(tmp_path, direction=direction)
 
                 # Accumulate missing codes
                 all_missing_codes["unmapped"].update(missing_codes.get("unmapped", set()))
@@ -264,7 +279,7 @@ if run_button:
                 # create workbook in a temp directory and provide download
                 temp_outdir = Path(tempfile.mkdtemp(prefix="swift_out_"))
                 try:
-                    out_path = create_workbook(rows, temp_outdir)  # returns Path to created workbook
+                    out_path = create_workbook(rows, temp_outdir, direction=direction)  # returns Path to created workbook
                     with open(out_path, "rb") as f:
                         data = f.read()
                     st.download_button(
@@ -287,7 +302,7 @@ if run_button:
                 outdir = Path(custom_out) if custom_out else (ROOT / "output" / "tables")
                 outdir.mkdir(parents=True, exist_ok=True)
                 try:
-                    outpath = create_workbook(rows, outdir)
+                    outpath = create_workbook(rows, outdir, direction=direction)
                     st.success(f"Workbook enregistré : {outpath}")
                     st.write("Fichiers présents dans", outdir)
                     st.write(sorted([p.name for p in outdir.glob("*.xlsx")], reverse=True))

@@ -19,6 +19,13 @@ from backend.app.extractors.mt202 import (
 )
 from backend.app.extractors.bic_utils import get_donneur_from_f52  # NEW
 
+# Pre-compiled patterns for performance
+_INVALID_DONNEUR_WORDS_MT103 = frozenset(['IDENTIFIANT', 'INSTITUTION', 'IDENTIFIER', 'CODE', 'PARTY'])
+_HTML_TAG_PATTERN = re.compile(r'<[^>]+>')
+_SLASH_PREFIX_PATTERN = re.compile(r'^\/[A-Z0-9\/\-]+')
+_BIC_FULLMATCH_PATTERN = re.compile(r'[A-Z0-9]{6,11}')
+_ACCOUNT_PATTERN = re.compile(r'(?m)^\s*\/?([A-Z]{2}[0-9A-Z]{8,34})\b')
+
 def parse_f32a_103(text: str) -> dict:
     blk = get_field_block(text, 'F32A') or text
     blk_clean = re.sub(r'#.*?#', '', blk, flags=re.S)
@@ -77,7 +84,7 @@ def parse_f59_account(text: str) -> Optional[str]:
 def parse_f52a_or_f50f_institution(text: str) -> Optional[str]:
     """
     Prefer F52A (donor) processed by bic_utils.get_donneur_from_f52.
-    If absent, fallback to previous heuristics (F50F/F50).
+    If absent or returns "IDENTIFIANT", fallback to F50F/F50 (cas particulier messages sortants).
     """
     # try F52A using strict bic_utils
     f52 = get_field_block(text, 'F52A')
@@ -85,20 +92,22 @@ def parse_f52a_or_f50f_institution(text: str) -> Optional[str]:
     donneur = None
     if f52:
         donneur = get_donneur_from_f52(f52, message_text=text)
-        if donneur:
-            return donneur
+        # Cas particulier messages sortants: si donneur est un mot label invalide, ignorer et chercher ailleurs
+        if donneur and not any(word in donneur.upper() for word in _INVALID_DONNEUR_WORDS_MT103):
+            return donneur  # Valid donneur found
+        # else: donneur is invalid, continue to fallback logic
 
     # fallback: try to get a human-friendly name from F52A (previous logic)
     if f52:
-        lines = [l.strip() for l in re.sub(r'<[^>]+>', ' ', f52).splitlines() if l.strip()]
+        lines = [l.strip() for l in _HTML_TAG_PATTERN.sub(' ', f52).splitlines() if l.strip()]
         name_lines = []
         for ln in lines:
             up = ln.upper()
-            if up.startswith("IDENTIFIER") or up.startswith("IDENTIFIERCODE") or up.startswith("CODE") or up.startswith("PARTYIDENTIFIER") or up.startswith("IDENTIFIANT"):
+            if any(word in up for word in _INVALID_DONNEUR_WORDS_MT103):
                 continue
-            if re.match(r'^\/[A-Z0-9\/\-]+', ln):
+            if _SLASH_PREFIX_PATTERN.match(ln):
                 continue
-            if re.fullmatch(r'[A-Z0-9]{6,11}', ln.replace(' ', '')):
+            if _BIC_FULLMATCH_PATTERN.fullmatch(ln.replace(' ', '')):
                 continue
             if len(ln) > 1:
                 name_lines.append(ln)
@@ -113,7 +122,7 @@ def parse_f52a_or_f50f_institution(text: str) -> Optional[str]:
             out = ' '.join(name_lines[:2]).strip()
             return out
 
-    # fallback to F50F / F50 (client giver)
+    # fallback to F50F / F50 (client giver) - cas particulier messages sortants MT103
     blk50 = get_field_block(text, 'F50F') or get_field_block(text, 'F50')
     if blk50:
         lines = [l.strip() for l in blk50.splitlines() if l.strip()]
@@ -121,7 +130,7 @@ def parse_f52a_or_f50f_institution(text: str) -> Optional[str]:
         for ln in lines:
             up = ln.upper()
             if up.startswith("NAMEANDADDRESS") or up.startswith("DETAILS") or re.search(r'[A-Za-z]', ln):
-                if up.startswith("NUMBER") or up.startswith("PARTYIDENTIFIER") or up.startswith("COMPTE"):
+                if up.startswith("NUMBER") or up.startswith("PARTYIDENTIFIER") or up.startswith("COMPTE") or up.startswith("CODE"):
                     continue
                 if len(ln) >= 4 and re.search(r'[A-Za-z]', ln):
                     name_candidates.append(ln)

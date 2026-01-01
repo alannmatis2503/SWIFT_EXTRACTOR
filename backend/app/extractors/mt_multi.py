@@ -36,6 +36,17 @@ IDENTIFIER_FIN_FULL_RE = re.compile(r'(?i)Identifier\s*[:\s]*\s*fin\.(\d{3}(?:\.
 # fallback simpler inline MT tokens
 MT_INLINE_RE = re.compile(r'\b(?:FIN|MT)[\s\-\._:\/]*(\d{3})\b', re.I)
 
+# Pre-compiled patterns for performance
+_MESSAGE_N_RE = re.compile(r'(?m)^\s*Message\s+\d+\b')
+_IDENTIFIER_RE = re.compile(r'(?mi)Identifier\s*[:\s]*fin\.\d{3}(?:\.[A-Z0-9]+)?')
+_UMI_RE = re.compile(r'(?m)^(?:Unique Message Identifier|Message Identifier)\b', re.M)
+_F20_TOKEN_RE = re.compile(r'(?mi)(:20:|\bF20[:\s])')
+_SEPARATOR_RE = re.compile(r'(?m)^\s*(\*{3,}|-{3,})\s*$')
+_UNDERSCORE_RE = re.compile(r'(?m)^\s*_{5,}\s*$')
+_SENDER_RE = re.compile(r'(?m)^Sender\s*:')
+_LABEL_SEARCH_RE = re.compile(r'(?i)(?:IdentifierCode|Identifier Code|Code d\'identifiant|Code d identifiant|Identifier code)\s*[:\-\s]*')
+_TOKEN_SEARCH_RE = re.compile(r'\b([A-Z0-9]{8,11})\b', re.I)
+
 # small helper to get F52A from a block (try to reuse mt202 helper if present)
 try:
     from backend.app.extractors.mt202 import get_field_block
@@ -79,7 +90,7 @@ def _split_messages(text: str) -> List[str]:
     norm = txt
 
     # 1) 'Message N' headings (common in many dumps)
-    msgs = list(re.finditer(r'(?m)^\s*Message\s+\d+\b', norm))
+    msgs = list(_MESSAGE_N_RE.finditer(norm))
     if len(msgs) >= 2:
         positions = [m.start() for m in msgs] + [len(norm)]
         blocks = [norm[positions[i]:positions[i+1]].strip() for i in range(len(positions)-1)]
@@ -87,22 +98,28 @@ def _split_messages(text: str) -> List[str]:
         return [b for b in blocks if b]
 
     # 2) 'Identifier: fin.XXX' header occurrences (covers fin.202.COV etc.)
-    idents = list(re.finditer(r'(?mi)Identifier\s*[:\s]*fin\.\d{3}(?:\.[A-Z0-9]+)?', norm))
+    idents = list(_IDENTIFIER_RE.finditer(norm))
     if len(idents) >= 2:
         positions = [m.start() for m in idents] + [len(norm)]
         blocks = [norm[positions[i]:positions[i+1]].strip() for i in range(len(positions)-1)]
         return [b for b in blocks if b]
 
+    # 2b) 'Sender:' header (particularité des messages sortants - outgoing messages)
+    senders = list(_SENDER_RE.finditer(norm))
+    if len(senders) >= 2:
+        positions = [m.start() for m in senders] + [len(norm)]
+        blocks = [norm[positions[i]:positions[i+1]].strip() for i in range(len(positions)-1)]
+        return [b for b in blocks if b]
+
     # 3) 'Unique Message Identifier' / 'Message Identifier' headings
-    umi = list(re.finditer(r'(?m)^(?:Unique Message Identifier|Message Identifier)\b', norm, flags=re.M))
+    umi = list(_UMI_RE.finditer(norm))
     if len(umi) >= 2:
         positions = [m.start() for m in umi] + [len(norm)]
         blocks = [norm[positions[i]:positions[i+1]].strip() for i in range(len(positions)-1)]
         return [b for b in blocks if b]
 
     # 4) split by :20: / F20 tokens (more tolerant: any occurrence of :20: or F20: or F20)
-    token_pat = re.compile(r'(?mi)(:20:|\bF20[:\s])')
-    tokens = list(token_pat.finditer(norm))
+    tokens = list(_F20_TOKEN_RE.finditer(norm))
     if tokens:
         positions = [m.start() for m in tokens]
         if positions and positions[0] != 0:
@@ -115,7 +132,7 @@ def _split_messages(text: str) -> List[str]:
             return blocks
 
     # 5) visual separators like lines with '***' or '---'
-    sep_matches = list(re.finditer(r'(?m)^\s*(\*{3,}|-{3,})\s*$', norm))
+    sep_matches = list(_SEPARATOR_RE.finditer(norm))
     if sep_matches:
         positions = []
         # collect segment between separators
@@ -133,7 +150,7 @@ def _split_messages(text: str) -> List[str]:
             return blocks
 
     # 6) fallback: try splitting by large page-like separators (multiple underscores)
-    page_like = re.split(r'(?m)^\s*_{5,}\s*$', norm)
+    page_like = _UNDERSCORE_RE.split(norm)
     if len(page_like) >= 2:
         blocks = [p.strip() for p in page_like if p.strip()]
         if len(blocks) >= 2:
@@ -166,7 +183,10 @@ def _should_reject_mt103(row: Dict) -> bool:
     - "BANQUE DE FRANCE"
     - "FW021083459"
     """
-    if not row.get("type_MT", "").startswith("fin.103"):
+    if not row or not row.get("type_MT"):
+        return False
+    
+    if not row.get("type_MT").startswith("fin.103"):
         return False
     
     forbidden_patterns = ["BANQUE DE FRANCE", "FW021083459"]
@@ -227,19 +247,98 @@ def _fill_country_from_code_force(row: Dict, xlsx_path: Optional[str] = None) ->
     return row
 
 
+def _extract_f58a_beneficiary(row: Dict, block_text: str, xlsx_path: Optional[str] = None) -> Dict:
+    """
+    For MT202 outgoing: extract F58A (Beneficiary Institution) to populate beneficiaire.
+    Extract BIC code from F58A and match against bic_codes.xlsx to get name.
+    If name not found, use code and track as unmapped.
+    
+    Returns:
+        Updated row with beneficiaire field populated
+    """
+    try:
+        f58_block = get_field_block(block_text, 'F58A')
+    except Exception:
+        f58_block = None
+
+    code_name = None
+    code_only = None
+
+    if HAS_BIC_UTILS and f58_block:
+        try:
+            # Try to extract code from F58A using similar logic as F52A
+            # Look for BIC pattern in F58A
+            m_bic = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f58_block)
+            if m_bic:
+                code_only = m_bic.group(1).upper()
+                try:
+                    name = bic_utils.map_code_to_name(code_only, xlsx_path=xlsx_path)
+                    if name:
+                        code_name = f"{code_only}/{name}"
+                    else:
+                        code_name = code_only
+                except Exception as e:
+                    logger.debug("mt_multi: map_code_to_name failed for F58A code %s: %s", code_only, e)
+                    code_name = code_only
+        except Exception as e:
+            logger.debug("mt_multi: F58A extraction error: %s", e)
+            code_name = None
+
+    if not code_name and f58_block:
+        # Fallback: search for any BIC-like pattern in F58A block
+        m_bic = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f58_block)
+        if m_bic:
+            code_only = m_bic.group(1).upper()
+            code_name = code_only
+
+    if code_name:
+        # Set beneficiaire to name if available, otherwise code
+        if '/' in code_name:
+            code_only, name_only = code_name.split('/', 1)
+            row["beneficiaire"] = name_only if name_only else code_only
+        else:
+            row["beneficiaire"] = code_name
+    else:
+        row["beneficiaire"] = None
+    
+    return row
+
 
 # ---------- postprocessing for 202/103: F52A -> CODE/Name ----------
+# Import helpers at module level for performance
+try:
+    from backend.app.extractors.mt202 import extract_name_from_f52d, extract_name_from_f50f
+    HAS_NAME_EXTRACTORS = True
+except Exception:
+    HAS_NAME_EXTRACTORS = False
+
+# Constants for invalid words check (set for O(1) lookup)
+_INVALID_DONNEUR_WORDS = frozenset(['IDENTIFIANT', 'INSTITUTION', 'IDENTIFIER', 'CODE', 'NAMEANDADDRESS', 'PARTY'])
+
 def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional[str] = None) -> Dict:
     """
     For MT202 / MT103 and variants (like 202.COV) : attempt to extract a strict Identifier
     token from F52A (or message text) using bic_utils.get_donneur_from_f52 (if available).
+    Cas particulier messages sortants: essayer F52D si F52A absent, et si le résultat est un mot invalide, extraire le nom réel.
     If a CODE or CODE/Name is found, fill row['code_donneur_dordre'] (the code) and 
     row['donneur_dordre'] (the name only).
     """
     try:
         f52_block = get_field_block(block_text, 'F52A')
+        f52d_block = None
+        f50f_block = None
+        # Cas particulier messages sortants: essayer F52D si F52A absent
+        if not f52_block:
+            f52_block = get_field_block(block_text, 'F52D')
+            f52d_block = f52_block
+        # Cas particulier MT103 sortants: essayer F50F
+        if not f52_block:
+            f52_block = get_field_block(block_text, 'F50F')
+            f50f_block = f52_block
     except Exception:
         f52_block = None
+        f52d_block = None
+        f50f_block = None
 
     code_name = None
     code_only = None
@@ -248,6 +347,20 @@ def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional
         try:
             # bic_utils.get_donneur_from_f52 returns "CODE/Name" or CODE or None
             code_name = bic_utils.get_donneur_from_f52(f52_block, message_text=block_text, xlsx_path=xlsx_path)
+            
+            # Cas particulier: si code_name est un mot label invalide et on a F52D ou F50F, extraire le vrai nom
+            if code_name and (f52d_block or f50f_block) and HAS_NAME_EXTRACTORS:
+                code_name_upper = code_name.upper()
+                # Use set membership for O(1) lookup
+                if any(word in code_name_upper for word in _INVALID_DONNEUR_WORDS):
+                    name_from_field = None
+                    if f52d_block:
+                        name_from_field = extract_name_from_f52d(f52d_block)
+                    elif f50f_block:
+                        name_from_field = extract_name_from_f50f(f50f_block)
+                    
+                    if name_from_field:
+                        code_name = name_from_field
         except Exception as e:
             logger.debug("mt_multi: bic_utils.get_donneur_from_f52 error: %s", e)
             code_name = None
@@ -313,10 +426,10 @@ def _extract_f52a_for_mt910(row: Dict, block_text: str, xlsx_path: Optional[str]
 
     if not code_name:
         # fallback naive search near label if bic_utils absent or returned None
-        m_label = re.search(r'(?i)(?:IdentifierCode|Identifier Code|Code d\'identifiant|Code d identifiant|Identifier code)\s*[:\-\s]*', block_text)
+        m_label = _LABEL_SEARCH_RE.search(block_text)
         if m_label:
             tail = block_text[m_label.end(): m_label.end() + 800]
-            m_tok = re.search(r'\b([A-Z0-9]{8,11})\b', tail, flags=re.I)
+            m_tok = _TOKEN_SEARCH_RE.search(tail)
             if m_tok:
                 code_only = m_tok.group(1).upper()
                 if HAS_BIC_UTILS:
@@ -353,10 +466,11 @@ def _extract_f52a_for_mt910(row: Dict, block_text: str, xlsx_path: Optional[str]
     return row
 
 
-def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) -> tuple[List[Dict], Dict[str, set]]:
+def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, direction: str = "incoming") -> tuple[List[Dict], Dict[str, set]]:
     """
     Main entrypoint: read pdf_path, split into messages, dispatch to extractors.
     bic_xlsx: optional path forwarded to bic_utils when used in postprocessing.
+    direction: "incoming" or "outgoing" - determines beneficiary extraction logic
     
     Returns:
         tuple: (list of extracted rows, dict with 'unmapped' and 'empty' code sets)
@@ -411,11 +525,16 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
                 # postprocess like other 202/103
                 row = _postprocess_row_for_202_103(row, blk, xlsx_path=bic_xlsx)
 
-                # FORCE beneficiary empty for 202 variants (requirement)
-                try:
-                    row["beneficiaire"] = None
-                except Exception:
-                    row.update({"beneficiaire": None})
+                # Beneficiary handling based on direction
+                if direction == "incoming":
+                    # FORCE beneficiary empty for 202 incoming (requirement)
+                    try:
+                        row["beneficiaire"] = None
+                    except Exception:
+                        row.update({"beneficiaire": None})
+                elif direction == "outgoing":
+                    # Extract F58A for outgoing MT202
+                    row = _extract_f58a_beneficiary(row, blk, xlsx_path=bic_xlsx)
 
                 # if variant .COV present, force type_MT accordingly
                 if '.' in mt_type_token:
@@ -427,6 +546,9 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
             elif mt_type_token == '103':
                 row = mt103.extract_block(blk, source=source_label)
                 row = _postprocess_row_for_202_103(row, blk, xlsx_path=bic_xlsx)
+                # Pour MT103 sortants: bénéficiaire vide (à implémenter plus tard)
+                if direction == "outgoing":
+                    row["beneficiaire"] = None
             elif mt_type_token == '910':
                 # For 910 we do NOT use bic mapping in dispatcher; mt910 is responsible
                 row = mt910.extract_block(blk, source=source_label)
@@ -473,6 +595,11 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
                 "error": str(e)
             }
 
+        # Safety check: ensure row is not None
+        if row is None:
+            logger.warning("mt_multi: row is None for message %s (type=%s), skipping", source_label, mt_type_token)
+            continue
+
         # ensure expected keys present
         expected = ["type_MT","code_banque","sender_bic","receiver_bic","reference","date_reference",
                     "devise","montant","code_donneur_dordre","donneur_dordre","beneficiaire","pays_iso3","source_pdf"]
@@ -483,7 +610,7 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
             row["source_pdf"] = source_label
 
         # RÈGLE 2: Pour MT910, filtrer si F50A (Client donneur d'ordre) contient IdentifierCode == "BEACCMCX091"
-        if row.get("type_MT", "").startswith("fin.910"):
+        if row.get("type_MT") and row.get("type_MT").startswith("fin.910"):
             f50a_block = get_field_block(blk, 'F50A')
             if f50a_block:
                 # Chercher le code d'identifiant dans F50A après la ligne "IdentifierCode: Code d'identifiant:"
@@ -514,6 +641,15 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
         elif name == code:
             # Case 1: Code found but no name mapping (name == code means no mapping)
             missing_codes["unmapped"].add(code)
+        
+        # For outgoing MT202: also track beneficiary BIC if unmapped
+        mt_type = row.get("type_MT")
+        if direction == "outgoing" and mt_type and mt_type.startswith("fin.202"):
+            beneficiary = row.get("beneficiaire")
+            # Check if beneficiaire looks like a BIC code (all uppercase, no spaces, 8-11 chars)
+            if beneficiary and len(beneficiary) >= 8 and len(beneficiary) <= 11 and beneficiary.isupper() and ' ' not in beneficiary:
+                # This is likely an unmapped BIC code
+                missing_codes["unmapped"].add(beneficiary)
 
         rows.append(row)
 

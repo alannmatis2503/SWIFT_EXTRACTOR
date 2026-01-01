@@ -73,7 +73,11 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
         db.close()
 
 @router.post("/upload")
-async def upload(files: List[UploadFile] = File(...), current = Depends(require_role("user"))):
+async def upload(
+    files: List[UploadFile] = File(...), 
+    direction: str = Form("incoming"),
+    current = Depends(require_role("user"))
+):
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     rows = []
@@ -81,10 +85,10 @@ async def upload(files: List[UploadFile] = File(...), current = Depends(require_
         dest = RAW_DIR / up.filename
         with open(dest, "wb") as f:
             shutil.copyfileobj(up.file, f)
-        logger.info(f"Saved upload {up.filename}")
-        r = extract_single(dest)
+        logger.info(f"Saved upload {up.filename} (direction: {direction})")
+        r = extract_single(dest, direction=direction)
         rows.append(r)
-    out_file = create_workbook(rows, OUT_DIR)
+    out_file = create_workbook(rows, OUT_DIR, direction=direction)
     return FileResponse(str(out_file), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=out_file.name)
 
 @router.get("/runs")
