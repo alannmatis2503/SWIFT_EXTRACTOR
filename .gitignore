@@ -25,3 +25,10 @@ dist/
 alann
 alann.pub
 
+# Data files - IMPORTANT: Ne jamais pousser les PDFs
+data/
+*.pdf
+*.xlsx
+output/
+logs/
+
