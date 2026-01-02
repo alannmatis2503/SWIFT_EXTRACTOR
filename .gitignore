@@ -31,3 +31,6 @@ data/raw/*.pdf
 output/
 logs/
 
+# Separate projects
+manuella/
+
