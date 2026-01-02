@@ -9,7 +9,7 @@ import shutil, os
 from .db import SessionLocal, init_db, get_user, verify_password
 from .db import create_user as create_user_db
 from .utils import logger
-from .extractor_manager import extract_single, create_workbook
+from .extractor_manager import extract_dispatch, create_workbook
 from typing import List
 
 router = APIRouter()
@@ -81,14 +81,16 @@ async def upload(
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     rows = []
+    beaccmcx091_rows = []
     for up in files:
         dest = RAW_DIR / up.filename
         with open(dest, "wb") as f:
             shutil.copyfileobj(up.file, f)
         logger.info(f"Saved upload {up.filename} (direction: {direction})")
-        r = extract_single(dest, direction=direction)
-        rows.append(r)
-    out_file = create_workbook(rows, OUT_DIR, direction=direction)
+        file_rows, file_beac_rows, _ = extract_dispatch(dest, direction=direction)
+        rows.extend(file_rows)
+        beaccmcx091_rows.extend(file_beac_rows)
+    out_file = create_workbook(rows, OUT_DIR, direction=direction, beaccmcx091_rows=beaccmcx091_rows)
     return FileResponse(str(out_file), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=out_file.name)
 
 @router.get("/runs")

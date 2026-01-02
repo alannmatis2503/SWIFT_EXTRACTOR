@@ -466,14 +466,14 @@ def _extract_f52a_for_mt910(row: Dict, block_text: str, xlsx_path: Optional[str]
     return row
 
 
-def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, direction: str = "incoming") -> tuple[List[Dict], Dict[str, set]]:
+def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, direction: str = "incoming") -> tuple[List[Dict], List[Dict], Dict[str, set]]:
     """
     Main entrypoint: read pdf_path, split into messages, dispatch to extractors.
     bic_xlsx: optional path forwarded to bic_utils when used in postprocessing.
     direction: "incoming" or "outgoing" - determines beneficiary extraction logic
     
     Returns:
-        tuple: (list of extracted rows, dict with 'unmapped' and 'empty' code sets)
+        tuple: (list of extracted rows, list of BEACCMCX091 rows, dict with 'unmapped' and 'empty' code sets)
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
@@ -490,6 +490,7 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
     blocks = _split_messages(text)
     multi = len(blocks) > 1
     rows: List[Dict] = []
+    beaccmcx091_rows: List[Dict] = []  # Messages BEACCMCX091 séparés
     missing_codes: Dict[str, set] = {
         "unmapped": set(),  # codes found but no name mapping
         "empty": set()      # no code found at all
@@ -609,7 +610,8 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
         if not row.get("source_pdf"):
             row["source_pdf"] = source_label
 
-        # RÈGLE 2: Pour MT910, filtrer si F50A (Client donneur d'ordre) contient IdentifierCode == "BEACCMCX091"
+        # RÈGLE 2: Pour MT910, séparer les BEACCMCX091 (ne plus les rejeter, les stocker séparément)
+        is_beaccmcx091 = False
         if row.get("type_MT") and row.get("type_MT").startswith("fin.910"):
             f50a_block = get_field_block(blk, 'F50A')
             if f50a_block:
@@ -618,10 +620,10 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                 if m:
                     code = m.group(1).strip().upper()
                     if code == "BEACCMCX091":
-                        logger.debug("mt_multi: Message %s rejeté (MT910 avec F50A=BEACCMCX091)", source_label)
-                        continue  # Passer au message suivant (ne pas ajouter à rows)
+                        logger.debug("mt_multi: Message %s identifié comme BEACCMCX091 (stocké séparément)", source_label)
+                        is_beaccmcx091 = True
             
-            # MT910: Extract F52A for beneficiary/donneur_dordre (after RULE 2 check)
+            # MT910: Extract F52A for beneficiary/donneur_dordre (même pour BEACCMCX091)
             row = _extract_f52a_for_mt910(row, blk, xlsx_path=bic_xlsx)
         
         # RÈGLE 3: Pour MT103, rejeter si F53A/F54A/F57A contient patterns interdits
@@ -651,9 +653,13 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                 # This is likely an unmapped BIC code
                 missing_codes["unmapped"].add(beneficiary)
 
-        rows.append(row)
+        # Ajouter le message à la liste appropriée
+        if is_beaccmcx091:
+            beaccmcx091_rows.append(row)
+        else:
+            rows.append(row)
 
-    return rows, missing_codes
+    return rows, beaccmcx091_rows, missing_codes
 
 
 # quick CLI for manual test
