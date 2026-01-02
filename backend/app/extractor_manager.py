@@ -355,12 +355,12 @@ def detect_message_type(text: str) -> Optional[str]:
     return None
 
 
-def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[Dict], Dict[str, set]]:
+def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[Dict], List[Dict], Dict[str, set]]:
     """
     Dispatcher intelligent :
       - si le PDF contient plusieurs messages -> utilise mt_multi.extract_messages_from_pdf
       - sinon -> utilise extract_single (retourne [row])
-    Retourne toujours : (liste de rows, dict de codes manquants)
+    Retourne toujours : (liste de rows, liste de BEACCMCX091 rows, dict de codes manquants)
     
     Args:
         pdf_path: Path to the PDF file
@@ -385,6 +385,7 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
             text = ""
 
     missing_codes: Dict[str, set] = {"unmapped": set(), "empty": set()}
+    beaccmcx091_rows: List[Dict] = []  # Liste séparée pour les messages BEACCMCX091
 
     # If multi-message extractor available, use its split logic to decide
     if HAS_MT_MULTI and mt_multi_module:
@@ -392,7 +393,7 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
             blocks = mt_multi_module._split_messages(text)
             if blocks and len(blocks) > 1:
                 logger.info("%s: detected %d messages (using mt_multi).", p.name, len(blocks))
-                rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction)
+                rows, beaccmcx091_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction)
                 # ensure backward compatibility: set institution_name from donneur_dordre if missing
                 for r in rows:
                     if "institution_name" not in r or not r.get("institution_name"):
@@ -400,14 +401,21 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
                     for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf"]:
                         if k not in r:
                             r[k] = None
-                return rows, missing_codes
+                # apply same compatibility to BEACCMCX091 rows
+                for r in beaccmcx091_rows:
+                    if "institution_name" not in r or not r.get("institution_name"):
+                        r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
+                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf"]:
+                        if k not in r:
+                            r[k] = None
+                return rows, beaccmcx091_rows, missing_codes
         except Exception as e:
             logger.exception("extract_dispatch: mt_multi detection/extraction failed for %s: %s", p.name, e)
             # fall through to single extractor
 
     # fallback: treat as single message
     single_row = extract_single(p, direction=direction)
-    return [single_row], missing_codes
+    return [single_row], beaccmcx091_rows, missing_codes
 
 
 def _ensure_minimal_row(p: Path, mt_type: Optional[str] = None) -> Dict:
@@ -518,10 +526,12 @@ def _sanitize_sheet_title(name: str, max_len: int = 31) -> str:
     return sanitized
 
 
-def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming") -> Path:
+def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None) -> Path:
     """
     Create an Excel workbook with:
       - a 'summary' sheet containing one row per extracted file (display headers in French)
+      - a 'BEACCMCX091' sheet if beaccmcx091_rows is provided
+      - per-country summary sheets
       - one additional sheet per file with key/value pairs (debug-friendly)
     Returns the Path to the saved workbook.
     
@@ -529,6 +539,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         rows: List of extracted data dictionaries
         out_dir: Output directory for the workbook
         direction: "incoming" or "outgoing" - used in filename
+        beaccmcx091_rows: Optional list of BEACCMCX091 messages to display separately
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -578,7 +589,43 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
             r.get("source_pdf")
         ])
 
-    # Add per-country summary sheets (right after main summary, before per-file sheets)
+    # Add BEACCMCX091 sheet if there are any (right after main summary, before country summaries)
+    if beaccmcx091_rows and len(beaccmcx091_rows) > 0:
+        beac_sheet = wb.create_sheet(title="BEACCMCX091", index=1)
+        beac_sheet.append(display_headers)
+        
+        for r in beaccmcx091_rows:
+            code_donneur = r.get("code_donneur_dordre") or None
+            donneur = r.get("donneur_dordre") or None
+            if not donneur and "institution_name" in r:
+                donneur = r.get("institution_name")
+            beneficiaire = r.get("beneficiaire") or None
+            beac_sheet.append([
+                r.get("code_banque"),
+                r.get("date_reference"),
+                r.get("reference"),
+                r.get("type_MT"),
+                r.get("pays_iso3"),
+                code_donneur,
+                donneur,
+                beneficiaire,
+                r.get("montant"),
+                r.get("devise"),
+                r.get("source_pdf")
+            ])
+        
+        # Adjust column widths for BEACCMCX091 sheet
+        try:
+            for col_idx in range(1, len(display_headers) + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in beac_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10
+                )
+                beac_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+
+    # Add per-country summary sheets (right after BEACCMCX091, before per-file sheets)
     countries = {}
     for r in rows:
         country = r.get("pays_iso3")
