@@ -82,15 +82,17 @@ async def upload(
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     rows = []
     beaccmcx091_rows = []
+    exception_323201_rows = []
     for up in files:
         dest = RAW_DIR / up.filename
         with open(dest, "wb") as f:
             shutil.copyfileobj(up.file, f)
         logger.info(f"Saved upload {up.filename} (direction: {direction})")
-        file_rows, file_beac_rows, _ = extract_dispatch(dest, direction=direction)
+        file_rows, file_beac_rows, file_exc_rows, _ = extract_dispatch(dest, direction=direction)
         rows.extend(file_rows)
         beaccmcx091_rows.extend(file_beac_rows)
-    out_file = create_workbook(rows, OUT_DIR, direction=direction, beaccmcx091_rows=beaccmcx091_rows)
+        exception_323201_rows.extend(file_exc_rows)
+    out_file = create_workbook(rows, OUT_DIR, direction=direction, beaccmcx091_rows=beaccmcx091_rows, exception_323201_rows=exception_323201_rows)
     return FileResponse(str(out_file), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=out_file.name)
 
 @router.get("/runs")

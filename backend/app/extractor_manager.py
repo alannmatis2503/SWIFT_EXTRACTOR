@@ -9,6 +9,7 @@ from typing import List, Dict, Optional
 
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
+from openpyxl.styles import numbers
 
 from .utils import logger
 
@@ -355,12 +356,12 @@ def detect_message_type(text: str) -> Optional[str]:
     return None
 
 
-def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[Dict], List[Dict], Dict[str, set]]:
+def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[Dict], List[Dict], List[Dict], Dict[str, set]]:
     """
     Dispatcher intelligent :
       - si le PDF contient plusieurs messages -> utilise mt_multi.extract_messages_from_pdf
       - sinon -> utilise extract_single (retourne [row])
-    Retourne toujours : (liste de rows, liste de BEACCMCX091 rows, dict de codes manquants)
+    Retourne toujours : (liste de rows, liste de BEACCMCX091 rows, liste de 323201 exception rows, dict de codes manquants)
     
     Args:
         pdf_path: Path to the PDF file
@@ -386,6 +387,7 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
 
     missing_codes: Dict[str, set] = {"unmapped": set(), "empty": set()}
     beaccmcx091_rows: List[Dict] = []  # Liste séparée pour les messages BEACCMCX091
+    exception_323201_rows: List[Dict] = []  # Liste pour les exceptions 323201
 
     # If multi-message extractor available, use its split logic to decide
     if HAS_MT_MULTI and mt_multi_module:
@@ -393,29 +395,36 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
             blocks = mt_multi_module._split_messages(text)
             if blocks and len(blocks) > 1:
                 logger.info("%s: detected %d messages (using mt_multi).", p.name, len(blocks))
-                rows, beaccmcx091_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction)
+                rows, beaccmcx091_rows, exception_323201_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction)
                 # ensure backward compatibility: set institution_name from donneur_dordre if missing
                 for r in rows:
                     if "institution_name" not in r or not r.get("institution_name"):
                         r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
-                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf"]:
+                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
                         if k not in r:
                             r[k] = None
                 # apply same compatibility to BEACCMCX091 rows
                 for r in beaccmcx091_rows:
                     if "institution_name" not in r or not r.get("institution_name"):
                         r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
-                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf"]:
+                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
                         if k not in r:
                             r[k] = None
-                return rows, beaccmcx091_rows, missing_codes
+                # apply same compatibility to exception_323201 rows
+                for r in exception_323201_rows:
+                    if "institution_name" not in r or not r.get("institution_name"):
+                        r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
+                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
+                        if k not in r:
+                            r[k] = None
+                return rows, beaccmcx091_rows, exception_323201_rows, missing_codes
         except Exception as e:
             logger.exception("extract_dispatch: mt_multi detection/extraction failed for %s: %s", p.name, e)
             # fall through to single extractor
 
     # fallback: treat as single message
     single_row = extract_single(p, direction=direction)
-    return [single_row], beaccmcx091_rows, missing_codes
+    return [single_row], beaccmcx091_rows, exception_323201_rows, missing_codes
 
 
 def _ensure_minimal_row(p: Path, mt_type: Optional[str] = None) -> Dict:
@@ -526,11 +535,13 @@ def _sanitize_sheet_title(name: str, max_len: int = 31) -> str:
     return sanitized
 
 
-def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None) -> Path:
+def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None) -> Path:
     """
     Create an Excel workbook with:
       - a 'summary' sheet containing one row per extracted file (display headers in French)
       - a 'BEACCMCX091' sheet if beaccmcx091_rows is provided
+      - a 'Exceptions_323201' sheet if exception_323201_rows is provided
+      - a 'Doublons_potentiels' sheet for potential duplicates (910 vs 202 with same ref+amount)
       - per-country summary sheets
       - one additional sheet per file with key/value pairs (debug-friendly)
     Returns the Path to the saved workbook.
@@ -540,6 +551,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         out_dir: Output directory for the workbook
         direction: "incoming" or "outgoing" - used in filename
         beaccmcx091_rows: Optional list of BEACCMCX091 messages to display separately
+        exception_323201_rows: Optional list of 323201 exception messages
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -550,7 +562,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     summary = wb.active
     summary.title = "summary"
 
-    # summary headers (user-facing)
+    # summary headers (user-facing) - avec nouvelles colonnes
     display_headers = [
         "code_banque",
         "date_reference",
@@ -560,34 +572,62 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         "Code du donneur d'ordre",
         "donneur d'ordre",
         "Bénéficiaire",
+        "correspondant",
         "montant",
         "devise",
+        "commentaires",
         "source_pdf"
     ]
     summary.append(display_headers)
 
-    # write summary rows (map internal keys -> display)
-    for r in rows:
-        # use code_donneur_dordre and donneur_dordre separately
+    def _convert_date_to_excel(date_str):
+        """Convertir une date ISO en objet datetime pour Excel."""
+        if not date_str:
+            return None
+        try:
+            # Format ISO: YYYY-MM-DD
+            if isinstance(date_str, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                return datetime.strptime(date_str, '%Y-%m-%d')
+            return date_str
+        except Exception:
+            return date_str
+
+    def _write_row_to_sheet(sheet, r, row_num=None):
+        """Écrire une ligne de données dans une feuille."""
         code_donneur = r.get("code_donneur_dordre") or None
         donneur = r.get("donneur_dordre") or None
-        # fallback: use institution_name if the new structure not present
         if not donneur and "institution_name" in r:
             donneur = r.get("institution_name")
         beneficiaire = r.get("beneficiaire") or None
-        summary.append([
+        correspondant = r.get("correspondant") or None
+        commentaires = r.get("commentaires") or None
+        date_ref = _convert_date_to_excel(r.get("date_reference"))
+        
+        row_data = [
             r.get("code_banque"),
-            r.get("date_reference"),
+            date_ref,
             r.get("reference"),
             r.get("type_MT"),
             r.get("pays_iso3"),
             code_donneur,
             donneur,
             beneficiaire,
+            correspondant,
             r.get("montant"),
             r.get("devise"),
+            commentaires,
             r.get("source_pdf")
-        ])
+        ]
+        sheet.append(row_data)
+        
+        # Appliquer le format date à la colonne date_reference (colonne B = 2)
+        if date_ref and isinstance(date_ref, datetime):
+            current_row = sheet.max_row
+            sheet.cell(row=current_row, column=2).number_format = 'DD/MM/YYYY'
+
+    # write summary rows
+    for r in rows:
+        _write_row_to_sheet(summary, r)
 
     # Add BEACCMCX091 sheet if there are any (right after main summary, before country summaries)
     if beaccmcx091_rows and len(beaccmcx091_rows) > 0:
@@ -595,24 +635,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         beac_sheet.append(display_headers)
         
         for r in beaccmcx091_rows:
-            code_donneur = r.get("code_donneur_dordre") or None
-            donneur = r.get("donneur_dordre") or None
-            if not donneur and "institution_name" in r:
-                donneur = r.get("institution_name")
-            beneficiaire = r.get("beneficiaire") or None
-            beac_sheet.append([
-                r.get("code_banque"),
-                r.get("date_reference"),
-                r.get("reference"),
-                r.get("type_MT"),
-                r.get("pays_iso3"),
-                code_donneur,
-                donneur,
-                beneficiaire,
-                r.get("montant"),
-                r.get("devise"),
-                r.get("source_pdf")
-            ])
+            _write_row_to_sheet(beac_sheet, r)
         
         # Adjust column widths for BEACCMCX091 sheet
         try:
@@ -625,7 +648,90 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         except Exception:
             pass
 
-    # Add per-country summary sheets (right after BEACCMCX091, before per-file sheets)
+    # Add Exceptions_323201 sheet if there are any
+    if exception_323201_rows and len(exception_323201_rows) > 0:
+        exc_sheet = wb.create_sheet(title="Exceptions_323201", index=2 if beaccmcx091_rows else 1)
+        exc_sheet.append(display_headers)
+        
+        for r in exception_323201_rows:
+            _write_row_to_sheet(exc_sheet, r)
+        
+        # Adjust column widths
+        try:
+            for col_idx in range(1, len(display_headers) + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in exc_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10
+                )
+                exc_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+
+    # NOUVELLE FONCTIONNALITÉ: Détection des doublons potentiels (910 vs 202)
+    # Combiner toutes les rows pour la détection
+    all_rows_for_duplicates = list(rows) + (beaccmcx091_rows or []) + (exception_323201_rows or [])
+    
+    # Créer des groupes par (référence, montant) pour détecter les doublons
+    potential_duplicates = []
+    seen_keys = {}
+    
+    for r in all_rows_for_duplicates:
+        mt_type = r.get("type_MT") or ""
+        montant = r.get("montant")
+        
+        # Pour les MT910, utiliser F20 comme référence (déjà fait dans l'extraction)
+        reference = r.get("reference")
+        
+        if reference and montant is not None:
+            # Normaliser la clé
+            key = (str(reference).strip().upper(), float(montant) if montant else 0)
+            
+            if key in seen_keys:
+                # Doublon potentiel trouvé
+                prev_row = seen_keys[key]
+                prev_type = prev_row.get("type_MT") or ""
+                
+                # Un doublon est si c'est un 910 vs 202 (ou l'inverse)
+                is_910_vs_202 = (
+                    ("910" in mt_type and "202" in prev_type) or
+                    ("202" in mt_type and "910" in prev_type)
+                )
+                
+                if is_910_vs_202:
+                    # Ajouter les deux si pas déjà ajoutés
+                    if prev_row not in potential_duplicates:
+                        potential_duplicates.append(prev_row)
+                    if r not in potential_duplicates:
+                        potential_duplicates.append(r)
+            else:
+                seen_keys[key] = r
+    
+    # Créer la feuille Doublons_potentiels si nécessaire
+    if potential_duplicates:
+        sheet_index = 1
+        if beaccmcx091_rows:
+            sheet_index += 1
+        if exception_323201_rows:
+            sheet_index += 1
+        
+        dup_sheet = wb.create_sheet(title="Doublons_potentiels", index=sheet_index)
+        dup_sheet.append(display_headers)
+        
+        for r in potential_duplicates:
+            _write_row_to_sheet(dup_sheet, r)
+        
+        # Adjust column widths
+        try:
+            for col_idx in range(1, len(display_headers) + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in dup_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10
+                )
+                dup_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+
+    # Add per-country summary sheets (after special sheets, before per-file sheets)
     countries = {}
     for r in rows:
         country = r.get("pays_iso3")
@@ -645,31 +751,16 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
             
             # Add rows for this country
             for r in country_rows:
-                code_donneur = r.get("code_donneur_dordre") or None
-                donneur = r.get("donneur_dordre") or None
-                if not donneur and "institution_name" in r:
-                    donneur = r.get("institution_name")
-                beneficiaire = r.get("beneficiaire") or None
-                country_sheet.append([
-                    r.get("code_banque"),
-                    r.get("date_reference"),
-                    r.get("reference"),
-                    r.get("type_MT"),
-                    r.get("pays_iso3"),
-                    code_donneur,
-                    donneur,
-                    beneficiaire,
-                    r.get("montant"),
-                    r.get("devise"),
-                    r.get("source_pdf")
-                ])
+                _write_row_to_sheet(country_sheet, r)
             
             # Adjust column widths
             try:
-                max_len_col1 = max((len(str(row[0])) for row in country_sheet.values if row[0] is not None), default=10)
-                max_len_col2 = max((len(str(row[1])) for row in country_sheet.values if len(row) > 1 and row[1] is not None), default=10)
-                country_sheet.column_dimensions[get_column_letter(1)].width = min(60, max(12, max_len_col1 + 2))
-                country_sheet.column_dimensions[get_column_letter(2)].width = min(80, max(12, max_len_col2 + 8))
+                for col_idx in range(1, len(display_headers) + 1):
+                    max_len = max(
+                        (len(str(cell.value)) for cell in country_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                        default=10
+                    )
+                    country_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
             except Exception:
                 pass
         except Exception as e:
@@ -692,18 +783,19 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
 
         ordered_keys = [
             "code_banque", "date_reference", "reference", "type_MT", "pays_iso3",
-            "code_donneur_dordre", "donneur_dordre", "institution_name", "beneficiaire", "montant", "devise", "source_pdf"
+            "code_donneur_dordre", "donneur_dordre", "institution_name", "beneficiaire", 
+            "correspondant", "montant", "devise", "commentaires", "source_pdf"
         ]
         written = set()
         for k in ordered_keys:
             if k in r:
-                label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else k))
+                label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else ("correspondant" if k == "correspondant" else ("commentaires" if k == "commentaires" else k))))
                 ws.append([label, r.get(k)])
                 written.add(k)
         for k, v in r.items():
             if k in written:
                 continue
-            label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else k))
+            label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else ("correspondant" if k == "correspondant" else ("commentaires" if k == "commentaires" else k))))
             ws.append([label, v])
 
         # adjust column widths heuristically

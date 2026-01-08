@@ -14,6 +14,7 @@ Returns list[dict] standardisés.
 from pathlib import Path
 import re
 from typing import List, Dict, Optional
+from datetime import datetime
 import pdfplumber
 import logging
 
@@ -175,6 +176,84 @@ def _detect_mt_type(block_text: str) -> Optional[str]:
     if m2:
         return m2.group(1)
     return None
+
+
+def _extract_f72_comment(block_text: str) -> Optional[str]:
+    """
+    Extraire le commentaire du champ F72 pour les 202 entrants.
+    Prend ce qui suit "Texte descriptif:" et ignore les "/"
+    """
+    f72_block = get_field_block(block_text, 'F72')
+    if not f72_block:
+        return None
+    
+    # Chercher "Texte descriptif:" et prendre ce qui suit
+    m = re.search(r'(?i)Texte descriptif\s*[:\s]*(.+)', f72_block, re.DOTALL)
+    if m:
+        comment = m.group(1).strip()
+        # Ignorer les "/"
+        comment = comment.replace('/', ' ').strip()
+        # Nettoyer les espaces multiples
+        comment = re.sub(r'\s+', ' ', comment).strip()
+        return comment if comment else None
+    return None
+
+
+def _extract_f70_comment(block_text: str) -> Optional[str]:
+    """
+    Extraire le commentaire du champ F70 pour les 103 entrants.
+    Ignorer "Informations sur le versement" et prendre le reste.
+    Le commentaire peut être sur plusieurs lignes.
+    Ignorer les "/"
+    """
+    f70_block = get_field_block(block_text, 'F70')
+    if not f70_block:
+        return None
+    
+    # Supprimer "Informations sur le versement" (case insensitive)
+    cleaned = re.sub(r'(?i)Informations sur le versement\s*', '', f70_block)
+    # Ignorer les "/"
+    cleaned = cleaned.replace('/', ' ')
+    # Nettoyer les espaces multiples et retours à la ligne
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned if cleaned else None
+
+
+def _extract_sender_bic(block_text: str) -> Optional[str]:
+    """
+    Extraire le BIC du sender depuis l'en-tête du message.
+    """
+    # Chercher dans "Sender:" ou "Sender Institution:"
+    m = re.search(r'(?i)Sender(?:\s+Institution)?\s*[:\s]*.*?([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)', block_text, re.DOTALL)
+    if m:
+        return m.group(1).upper()
+    return None
+
+
+def _extract_receiver_bic(block_text: str) -> Optional[str]:
+    """
+    Extraire le BIC du receiver depuis l'en-tête du message.
+    """
+    # Chercher dans "Receiver:" ou "Receiver Institution:"
+    m = re.search(r'(?i)Receiver(?:\s+Institution)?\s*[:\s]*.*?([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)', block_text, re.DOTALL)
+    if m:
+        return m.group(1).upper()
+    return None
+
+
+def _check_f58a_323201(block_text: str) -> bool:
+    """
+    Vérifier si le champ F58A contient exactement le nombre 323201.
+    Retourne True si trouvé (message à mettre en exception).
+    """
+    f58a_block = get_field_block(block_text, 'F58A')
+    if not f58a_block:
+        return False
+    
+    # Chercher le nombre exact 323201 (pas comme partie d'un autre nombre)
+    if re.search(r'\b323201\b', f58a_block):
+        return True
+    return False
 
 
 def _should_reject_mt103(row: Dict) -> bool:
@@ -466,14 +545,14 @@ def _extract_f52a_for_mt910(row: Dict, block_text: str, xlsx_path: Optional[str]
     return row
 
 
-def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, direction: str = "incoming") -> tuple[List[Dict], List[Dict], Dict[str, set]]:
+def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, direction: str = "incoming") -> tuple[List[Dict], List[Dict], List[Dict], Dict[str, set]]:
     """
     Main entrypoint: read pdf_path, split into messages, dispatch to extractors.
     bic_xlsx: optional path forwarded to bic_utils when used in postprocessing.
     direction: "incoming" or "outgoing" - determines beneficiary extraction logic
     
     Returns:
-        tuple: (list of extracted rows, list of BEACCMCX091 rows, dict with 'unmapped' and 'empty' code sets)
+        tuple: (list of extracted rows, list of BEACCMCX091 rows, list of 323201 exception rows, dict with 'unmapped' and 'empty' code sets)
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
@@ -491,6 +570,7 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
     multi = len(blocks) > 1
     rows: List[Dict] = []
     beaccmcx091_rows: List[Dict] = []  # Messages BEACCMCX091 séparés
+    exception_323201_rows: List[Dict] = []  # Messages 202 entrants avec 323201 dans F58A
     missing_codes: Dict[str, set] = {
         "unmapped": set(),  # codes found but no name mapping
         "empty": set()      # no code found at all
@@ -631,6 +711,40 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
             logger.debug("mt_multi: Message %s rejeté (MT103 avec champs interdits)", source_label)
             continue  # Passer au message suivant (ne pas ajouter à rows)
 
+        # NOUVELLE RÈGLE: Bénéficiaire vide pour MT103 entrants
+        mt_type = row.get("type_MT")
+        if direction == "incoming" and mt_type and mt_type.startswith("fin.103"):
+            row["beneficiaire"] = None
+
+        # NOUVELLE RÈGLE: Extraire commentaires (F72 pour 202, F70 pour 103)
+        if direction == "incoming":
+            if mt_type and mt_type.startswith("fin.202"):
+                row["commentaires"] = _extract_f72_comment(blk)
+            elif mt_type and mt_type.startswith("fin.103"):
+                row["commentaires"] = _extract_f70_comment(blk)
+            else:
+                row["commentaires"] = None
+        else:
+            row["commentaires"] = None
+
+        # NOUVELLE RÈGLE: Extraire le correspondant (receiver pour sortants, sender pour entrants)
+        sender_bic = _extract_sender_bic(blk) or row.get("sender_bic")
+        receiver_bic = _extract_receiver_bic(blk) or row.get("receiver_bic")
+        row["sender_bic"] = sender_bic
+        row["receiver_bic"] = receiver_bic
+        
+        if direction == "incoming":
+            row["correspondant"] = sender_bic
+        else:
+            row["correspondant"] = receiver_bic
+
+        # NOUVELLE RÈGLE: Exception pour 202 entrants avec 323201 dans F58A
+        is_exception_323201 = False
+        if direction == "incoming" and mt_type and mt_type.startswith("fin.202"):
+            if _check_f58a_323201(blk):
+                logger.debug("mt_multi: Message %s identifié avec 323201 dans F58A (exception)", source_label)
+                is_exception_323201 = True
+
         # Post-traitement: remplir pays_iso3 depuis code_donneur_dordre si absent
         row = _fill_country_from_code(row, xlsx_path=bic_xlsx)
 
@@ -645,7 +759,6 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
             missing_codes["unmapped"].add(code)
         
         # For outgoing MT202: also track beneficiary BIC if unmapped
-        mt_type = row.get("type_MT")
         if direction == "outgoing" and mt_type and mt_type.startswith("fin.202"):
             beneficiary = row.get("beneficiaire")
             # Check if beneficiaire looks like a BIC code (all uppercase, no spaces, 8-11 chars)
@@ -654,12 +767,14 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                 missing_codes["unmapped"].add(beneficiary)
 
         # Ajouter le message à la liste appropriée
-        if is_beaccmcx091:
+        if is_exception_323201:
+            exception_323201_rows.append(row)
+        elif is_beaccmcx091:
             beaccmcx091_rows.append(row)
         else:
             rows.append(row)
 
-    return rows, beaccmcx091_rows, missing_codes
+    return rows, beaccmcx091_rows, exception_323201_rows, missing_codes
 
 
 # quick CLI for manual test
