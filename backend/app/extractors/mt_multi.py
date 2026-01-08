@@ -181,37 +181,19 @@ def _detect_mt_type(block_text: str) -> Optional[str]:
 def _extract_f72_comment(block_text: str) -> Optional[str]:
     """
     Extraire le commentaire du champ F72 pour les 202 entrants.
-    Prend ce qui suit "Texte descriptif:" jusqu'à la fin de la ligne ou le prochain champ.
-    Ignore les "/"
+    Cherche exactement "Narrative: Texte descriptif:" et prend ce qui suit.
     """
     f72_block = get_field_block(block_text, 'F72')
     if not f72_block:
         return None
     
-    # Chercher toutes les occurrences de "Texte descriptif:" et extraire le contenu
-    comments = []
-    for m in re.finditer(r'(?i)(?:Narrative[:\s]*)?Texte descriptif[:\s]*([^\n]+)', f72_block):
-        comment_line = m.group(1).strip()
-        # Ignorer les lignes qui sont juste des labels, codes ou trop courtes
-        if comment_line and len(comment_line) > 3:
-            # Ignorer les lignes qui commencent par des codes comme /INS/, /BNF/, Code:
-            if re.match(r'^(/[A-Z]{2,4}/|Code[:\s])', comment_line, re.I):
-                continue
-            # Nettoyer les // au début
-            comment_line = re.sub(r'^[/\s]+', '', comment_line).strip()
-            if comment_line and len(comment_line) > 3:
-                comments.append(comment_line)
-    
-    if comments:
-        # Prendre le commentaire le plus long (probablement le plus pertinent)
-        result = max(comments, key=len)
-        # Supprimer "Texte descriptif:" s'il reste
-        result = re.sub(r'(?i)^Texte descriptif[:\s]*', '', result).strip()
-        # Nettoyer les // restants au début
-        result = re.sub(r'^[/\s]+', '', result).strip()
+    # Chercher exactement "Narrative: Texte descriptif:" et prendre ce qui suit
+    m = re.search(r'Narrative:\s*Texte descriptif:\s*([^\n]+)', f72_block)
+    if m:
+        comment = m.group(1).strip()
         # Nettoyer les espaces multiples
-        result = re.sub(r'\s+', ' ', result).strip()
-        return result if result else None
+        comment = re.sub(r'\s+', ' ', comment).strip()
+        return comment if comment else None
     return None
 
 
