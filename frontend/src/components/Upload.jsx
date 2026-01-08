@@ -7,12 +7,16 @@ export default function Upload({token, onLogout}){
   const [loading,setLoading]=useState(false);
   const [error,setError]=useState(null);
   const [direction, setDirection]=useState("incoming"); // "incoming" or "outgoing"
+  const [dateStart, setDateStart]=useState(""); // Date de début
+  const [dateEnd, setDateEnd]=useState(""); // Date de fin
 
   const upload = async () => {
     if(!files || files.length===0) return alert("Choose files");
     const fd = new FormData();
     for(let i=0;i<files.length;i++) fd.append("files", files[i]);
     fd.append("direction", direction); // Add direction to form data
+    if(dateStart) fd.append("date_start", dateStart);
+    if(dateEnd) fd.append("date_end", dateEnd);
     setLoading(true);
     setError(null);
     try {
@@ -75,6 +79,35 @@ export default function Upload({token, onLogout}){
       <div>
         <input type="file" multiple accept="application/pdf" onChange={e=>setFiles(e.target.files)} />
       </div>
+      
+      {/* Date range filter */}
+      <div style={{marginTop:15, padding:15, backgroundColor:"#f5f5f5", borderRadius:5}}>
+        <div style={{fontWeight:"bold", marginBottom:10}}>Filtrer par plage de dates (optionnel):</div>
+        <div style={{display:"flex", gap:15, alignItems:"center"}}>
+          <div>
+            <label style={{display:"block", marginBottom:5, fontSize:14}}>Date de début:</label>
+            <input 
+              type="date" 
+              value={dateStart}
+              onChange={e=>setDateStart(e.target.value)}
+              style={{padding:8, borderRadius:4, border:"1px solid #ccc"}}
+            />
+          </div>
+          <div>
+            <label style={{display:"block", marginBottom:5, fontSize:14}}>Date de fin:</label>
+            <input 
+              type="date" 
+              value={dateEnd}
+              onChange={e=>setDateEnd(e.target.value)}
+              style={{padding:8, borderRadius:4, border:"1px solid #ccc"}}
+            />
+          </div>
+        </div>
+        <div style={{marginTop:8, fontSize:12, color:"#666", fontStyle:"italic"}}>
+          Laissez vide pour extraire tous les messages. Vous pouvez spécifier une seule date (début ou fin) ou les deux.
+        </div>
+      </div>
+      
       <div style={{marginTop:10}}>
         <button onClick={upload} disabled={loading}>{loading ? "Processing..." : "Upload & Extract"}</button>
         <button onClick={onLogout} style={{marginLeft:8}}>Logout</button>

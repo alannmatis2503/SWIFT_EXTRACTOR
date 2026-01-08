@@ -535,7 +535,7 @@ def _sanitize_sheet_title(name: str, max_len: int = 31) -> str:
     return sanitized
 
 
-def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None) -> Path:
+def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None, date_start: str = None, date_end: str = None) -> Path:
     """
     Create an Excel workbook with:
       - a 'summary' sheet containing one row per extracted file (display headers in French)
@@ -552,11 +552,23 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         direction: "incoming" or "outgoing" - used in filename
         beaccmcx091_rows: Optional list of BEACCMCX091 messages to display separately
         exception_323201_rows: Optional list of 323201 exception messages
+        date_start: Optional start date for filtering (YYYY-MM-DD)
+        date_end: Optional end date for filtering (YYYY-MM-DD)
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = out_dir / f"swift_extraction_{direction}_{ts}.xlsx"
+    
+    # Ajouter la plage de dates au nom du fichier si spécifiée
+    date_suffix = ""
+    if date_start and date_end:
+        date_suffix = f"_{date_start}_to_{date_end}"
+    elif date_start:
+        date_suffix = f"_from_{date_start}"
+    elif date_end:
+        date_suffix = f"_to_{date_end}"
+    
+    out_path = out_dir / f"swift_extraction_{direction}{date_suffix}_{ts}.xlsx"
 
     wb = Workbook()
     summary = wb.active

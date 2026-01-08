@@ -60,6 +60,35 @@ def require_role(min_role: str):
         return user
     return dep
 
+def _filter_by_date_range(rows: List[dict], date_start: str = None, date_end: str = None) -> List[dict]:
+    """Filtrer les rows par plage de dates (date_reference)."""
+    if not date_start and not date_end:
+        return rows
+    
+    filtered = []
+    for row in rows:
+        date_ref = row.get("date_reference")
+        if not date_ref:
+            # Si pas de date, on garde le message
+            filtered.append(row)
+            continue
+        
+        # Convertir date_ref en string si c'est un datetime
+        if isinstance(date_ref, datetime):
+            date_ref_str = date_ref.strftime("%Y-%m-%d")
+        else:
+            date_ref_str = str(date_ref)
+        
+        # Vérifier si dans la plage
+        if date_start and date_ref_str < date_start:
+            continue
+        if date_end and date_ref_str > date_end:
+            continue
+        
+        filtered.append(row)
+    
+    return filtered
+
 @router.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends()):
     db = SessionLocal()
@@ -76,6 +105,8 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
 async def upload(
     files: List[UploadFile] = File(...), 
     direction: str = Form("incoming"),
+    date_start: str = Form(None),
+    date_end: str = Form(None),
     current = Depends(require_role("user"))
 ):
     RAW_DIR.mkdir(parents=True, exist_ok=True)
@@ -87,12 +118,19 @@ async def upload(
         dest = RAW_DIR / up.filename
         with open(dest, "wb") as f:
             shutil.copyfileobj(up.file, f)
-        logger.info(f"Saved upload {up.filename} (direction: {direction})")
+        logger.info(f"Saved upload {up.filename} (direction: {direction}, date_start: {date_start}, date_end: {date_end})")
         file_rows, file_beac_rows, file_exc_rows, _ = extract_dispatch(dest, direction=direction)
         rows.extend(file_rows)
         beaccmcx091_rows.extend(file_beac_rows)
         exception_323201_rows.extend(file_exc_rows)
-    out_file = create_workbook(rows, OUT_DIR, direction=direction, beaccmcx091_rows=beaccmcx091_rows, exception_323201_rows=exception_323201_rows)
+    
+    # Filtrer par plage de dates si spécifiée
+    if date_start or date_end:
+        rows = _filter_by_date_range(rows, date_start, date_end)
+        beaccmcx091_rows = _filter_by_date_range(beaccmcx091_rows, date_start, date_end)
+        exception_323201_rows = _filter_by_date_range(exception_323201_rows, date_start, date_end)
+    
+    out_file = create_workbook(rows, OUT_DIR, direction=direction, beaccmcx091_rows=beaccmcx091_rows, exception_323201_rows=exception_323201_rows, date_start=date_start, date_end=date_end)
     return FileResponse(str(out_file), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=out_file.name)
 
 @router.get("/runs")
