@@ -33,6 +33,7 @@ _FALLBACK_TOKEN_RE = re.compile(r'\b([A-Z0-9]{8,11})\b', re.I)
 _BIC_MAP_CACHE: Optional[Dict[str, str]] = None
 _BIC_FULLKEY_MAP: Optional[Dict[str, str]] = None
 _BIC_COUNTRY_MAP: Optional[Dict[str, str]] = None  # Code BIC -> Pays (ISO3)
+_REGLEMENT_MAP: Optional[Dict[str, Dict[str, str]]] = None  # Code règlement 4 chiffres -> {name, country, bic}
 
 
 def _find_strict_identifier_in_f52(f52_text: str) -> Optional[str]:
@@ -86,12 +87,12 @@ def _find_strict_identifier_in_f52(f52_text: str) -> Optional[str]:
 def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
     """
     Load the BIC mapping Excel file and return a dict mapping 8-char key -> bank name.
-    Also populate a full-key map for 11-char exact matches and a country map.
+    Also populate a full-key map for 11-char exact matches, a country map, and a reglement map.
     Default path: data/bic_codes.xlsx
 
     Expected columns: try to detect columns for code and name (flexible).
     """
-    global _BIC_MAP_CACHE, _BIC_FULLKEY_MAP, _BIC_COUNTRY_MAP
+    global _BIC_MAP_CACHE, _BIC_FULLKEY_MAP, _BIC_COUNTRY_MAP, _REGLEMENT_MAP
     if _BIC_MAP_CACHE is not None and _BIC_FULLKEY_MAP is not None:
         return _BIC_MAP_CACHE
 
@@ -99,11 +100,13 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
     mapping_full: Dict[str, str] = {}
     country_map: Dict[str, str] = {}
+    reglement_map: Dict[str, Dict[str, str]] = {}
 
     if not fp.exists():
         _BIC_MAP_CACHE = {}
         _BIC_FULLKEY_MAP = {}
         _BIC_COUNTRY_MAP = {}
+        _REGLEMENT_MAP = {}
         return _BIC_MAP_CACHE
 
     df = pd.read_excel(fp, dtype=str)
@@ -114,6 +117,7 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
     code_col = None
     name_col = None
     country_col = None
+    reglement_col = None
     col_upper = [c.strip().upper() for c in cols]
 
     # common name candidates
@@ -146,10 +150,17 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
             country_col = cols[i]
             break
 
+    # look for reglement column (compte de règlement / code 4 chiffres)
+    for i, cu in enumerate(col_upper):
+        if 'REGLEMENT' in cu or 'RÈGLEMENT' in cu or cu in ("COMPTE", "SETTLEMENT", "COMPTE_REGLEMENT"):
+            reglement_col = cols[i]
+            break
+
     if not code_col:
         _BIC_MAP_CACHE = {}
         _BIC_FULLKEY_MAP = {}
         _BIC_COUNTRY_MAP = {}
+        _REGLEMENT_MAP = {}
         return _BIC_MAP_CACHE
 
     # build mapping
@@ -164,6 +175,9 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
         raw_country = ""
         if country_col:
             raw_country = str(row.get(country_col) or "").strip().upper()
+        raw_reglement = ""
+        if reglement_col:
+            raw_reglement = str(row.get(reglement_col) or "").strip()
         
         # map first 8 chars -> name
         key8 = raw_code[:8]
@@ -180,10 +194,21 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
         # also keep full mapping for exact 11-char keys (useful for BEACCMCX100)
         if len(raw_code) >= 8:
             mapping_full[raw_code] = raw_name or mapping.get(raw_code[:8], "")
+        
+        # Store reglement code mapping (4 digit codes)
+        if raw_reglement and re.match(r'^\d{4,}$', raw_reglement):
+            # Extraire les 4 derniers chiffres si plus long
+            code_4 = raw_reglement[-4:] if len(raw_reglement) > 4 else raw_reglement
+            reglement_map[code_4] = {
+                "name": raw_name,
+                "country": raw_country,
+                "bic": raw_code
+            }
 
     _BIC_MAP_CACHE = mapping
     _BIC_FULLKEY_MAP = mapping_full
     _BIC_COUNTRY_MAP = country_map
+    _REGLEMENT_MAP = reglement_map
     return _BIC_MAP_CACHE
 
 
@@ -253,6 +278,63 @@ def get_donneur_from_f52(f52_text: Optional[str], message_text: Optional[str] = 
     return code
 
 
+def map_reglement_code(code_4: str, xlsx_path: Optional[str] = None) -> Optional[Dict[str, str]]:
+    """
+    Map a 4-digit reglement code to bank info using the Reglement column.
+    
+    Args:
+        code_4: 4-digit reglement code (e.g., "8428")
+        xlsx_path: Optional path to bic_codes.xlsx
+        
+    Returns:
+        Dict with keys 'name', 'country', 'bic' if found, None otherwise
+    """
+    if not code_4:
+        return None
+    
+    _ = load_bic_mapping(xlsx_path=xlsx_path)  # populate caches
+    global _REGLEMENT_MAP
+    
+    if not _REGLEMENT_MAP:
+        return None
+    
+    # Normaliser le code (prendre les 4 derniers chiffres)
+    code_clean = code_4.strip()[-4:]
+    
+    if code_clean in _REGLEMENT_MAP:
+        return _REGLEMENT_MAP[code_clean]
+    
+    return None
+
+
+def extract_4digit_code_from_f52d(f52d_text: str) -> Optional[str]:
+    """
+    Extract a 4-digit reglement code from F52D field.
+    The code is typically in an account number format.
+    
+    Args:
+        f52d_text: The F52D block text
+        
+    Returns:
+        4-digit code if found, None otherwise
+    """
+    if not f52d_text:
+        return None
+    
+    # Chercher un code de 4 chiffres dans le texte
+    # Il peut être dans un format comme /8428 ou juste 8428
+    patterns = [
+        r'/(\d{4})\b',           # /8428
+        r'\b(\d{4})\b',          # 8428 seul
+        r'[A-Z]{2}\d{2}(\d{4})', # Dans un IBAN-like
+    ]
+    
+    for pattern in patterns:
+        m = re.search(pattern, f52d_text)
+        if m:
+            return m.group(1)
+    
+    return None
 def map_code_to_country(code: str, xlsx_path: Optional[str] = None) -> Optional[str]:
     """
     Map a raw code (8..11 chars) to country ISO3 code using loaded mapping.

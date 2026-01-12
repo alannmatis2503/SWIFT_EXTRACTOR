@@ -356,12 +356,13 @@ def detect_message_type(text: str) -> Optional[str]:
     return None
 
 
-def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[Dict], List[Dict], List[Dict], Dict[str, set]]:
+def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[Dict], List[Dict], List[Dict], List[Dict], Dict[str, set]]:
     """
     Dispatcher intelligent :
       - si le PDF contient plusieurs messages -> utilise mt_multi.extract_messages_from_pdf
       - sinon -> utilise extract_single (retourne [row])
-    Retourne toujours : (liste de rows, liste de BEACCMCX091 rows, liste de 323201 exception rows, dict de codes manquants)
+    Retourne toujours : (liste de rows, liste de BEACCMCX091 rows, liste de 323201 exception rows, 
+                         liste d'autres exceptions (EUR/nivellement), dict de codes manquants)
     
     Args:
         pdf_path: Path to the PDF file
@@ -388,6 +389,7 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
     missing_codes: Dict[str, set] = {"unmapped": set(), "empty": set()}
     beaccmcx091_rows: List[Dict] = []  # Liste séparée pour les messages BEACCMCX091
     exception_323201_rows: List[Dict] = []  # Liste pour les exceptions 323201
+    other_exceptions_rows: List[Dict] = []  # Liste pour les autres exceptions (EUR/nivellement)
 
     # If multi-message extractor available, use its split logic to decide
     if HAS_MT_MULTI and mt_multi_module:
@@ -395,7 +397,7 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
             blocks = mt_multi_module._split_messages(text)
             if blocks and len(blocks) > 1:
                 logger.info("%s: detected %d messages (using mt_multi).", p.name, len(blocks))
-                rows, beaccmcx091_rows, exception_323201_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction)
+                rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction)
                 # ensure backward compatibility: set institution_name from donneur_dordre if missing
                 for r in rows:
                     if "institution_name" not in r or not r.get("institution_name"):
@@ -417,14 +419,21 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
                     for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
                         if k not in r:
                             r[k] = None
-                return rows, beaccmcx091_rows, exception_323201_rows, missing_codes
+                # apply same compatibility to other_exceptions rows
+                for r in other_exceptions_rows:
+                    if "institution_name" not in r or not r.get("institution_name"):
+                        r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
+                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
+                        if k not in r:
+                            r[k] = None
+                return rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, missing_codes
         except Exception as e:
             logger.exception("extract_dispatch: mt_multi detection/extraction failed for %s: %s", p.name, e)
             # fall through to single extractor
 
     # fallback: treat as single message
     single_row = extract_single(p, direction=direction)
-    return [single_row], beaccmcx091_rows, exception_323201_rows, missing_codes
+    return [single_row], beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, missing_codes
 
 
 def _ensure_minimal_row(p: Path, mt_type: Optional[str] = None) -> Dict:
@@ -535,12 +544,13 @@ def _sanitize_sheet_title(name: str, max_len: int = 31) -> str:
     return sanitized
 
 
-def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None, date_start: str = None, date_end: str = None) -> Path:
+def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None, other_exceptions_rows: Optional[List[Dict]] = None, date_start: str = None, date_end: str = None) -> Path:
     """
     Create an Excel workbook with:
       - a 'summary' sheet containing one row per extracted file (display headers in French)
       - a 'BEACCMCX091' sheet if beaccmcx091_rows is provided
       - a 'Exceptions_323201' sheet if exception_323201_rows is provided
+      - a 'Autres_Exceptions' sheet for EUR/nivellement exceptions
       - a 'Doublons_potentiels' sheet for potential duplicates (910 vs 202 with same ref+amount)
       - per-country summary sheets
       - one additional sheet per file with key/value pairs (debug-friendly)
@@ -552,6 +562,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         direction: "incoming" or "outgoing" - used in filename
         beaccmcx091_rows: Optional list of BEACCMCX091 messages to display separately
         exception_323201_rows: Optional list of 323201 exception messages
+        other_exceptions_rows: Optional list of other exceptions (EUR/nivellement)
         date_start: Optional start date for filtering (YYYY-MM-DD)
         date_end: Optional end date for filtering (YYYY-MM-DD)
     """
@@ -679,9 +690,34 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         except Exception:
             pass
 
+    # Add Autres_Exceptions sheet if there are any (EUR/nivellement exceptions)
+    sheet_index = 1
+    if beaccmcx091_rows:
+        sheet_index += 1
+    if exception_323201_rows:
+        sheet_index += 1
+    
+    if other_exceptions_rows and len(other_exceptions_rows) > 0:
+        other_exc_sheet = wb.create_sheet(title="Autres_Exceptions", index=sheet_index)
+        other_exc_sheet.append(display_headers)
+        
+        for r in other_exceptions_rows:
+            _write_row_to_sheet(other_exc_sheet, r)
+        
+        # Adjust column widths
+        try:
+            for col_idx in range(1, len(display_headers) + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in other_exc_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10
+                )
+                other_exc_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+
     # NOUVELLE FONCTIONNALITÉ: Détection des doublons potentiels (910 vs 202)
     # Combiner toutes les rows pour la détection
-    all_rows_for_duplicates = list(rows) + (beaccmcx091_rows or []) + (exception_323201_rows or [])
+    all_rows_for_duplicates = list(rows) + (beaccmcx091_rows or []) + (exception_323201_rows or []) + (other_exceptions_rows or [])
     
     # Créer des groupes par (référence, montant) pour détecter les doublons
     potential_duplicates = []
@@ -824,4 +860,180 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     logger.info("Workbook created with country sheets: %s", out_path)
     return out_path
 
+
+def extract_transfer_analysis_dispatch(pdf_path: Path) -> tuple[List[Dict], List[Dict], Dict[str, set]]:
+    """
+    Dispatch pour l'analyse des transferts sortants exécutés.
+    Utilise mt_multi.extract_transfer_analysis.
+    
+    Returns:
+        tuple: (matched_900_rows, suspens_rows, missing_codes)
+    """
+    p = Path(pdf_path)
+    
+    if HAS_MT_MULTI and mt_multi_module:
+        try:
+            return mt_multi_module.extract_transfer_analysis(p)
+        except Exception as e:
+            logger.exception("extract_transfer_analysis_dispatch: failed for %s: %s", p.name, e)
+    
+    # Fallback: retourner des listes vides
+    return [], [], {"unmapped": set(), "empty": set()}
+
+
+def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: List[Dict], out_dir: Path, date_start: str = None, date_end: str = None) -> Path:
+    """
+    Créer un workbook Excel pour l'analyse des transferts sortants exécutés.
+    
+    Sheets:
+    - "Transferts_Executes": MT900 matchés avec leurs infos complétées
+    - "Suspens": MT202/MT103 sans confirmation MT900
+    
+    Args:
+        matched_rows: Liste des MT900 matchés
+        suspens_rows: Liste des MT202/MT103 sans correspondant
+        out_dir: Répertoire de sortie
+        date_start: Date de début optionnelle
+        date_end: Date de fin optionnelle
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    date_suffix = ""
+    if date_start and date_end:
+        date_suffix = f"_{date_start}_to_{date_end}"
+    elif date_start:
+        date_suffix = f"_from_{date_start}"
+    elif date_end:
+        date_suffix = f"_to_{date_end}"
+    
+    out_path = out_dir / f"analyse_transferts{date_suffix}_{ts}.xlsx"
+    
+    wb = Workbook()
+    
+    # Headers pour les feuilles
+    transfer_headers = [
+        "type_MT",
+        "reference",
+        "related_reference",
+        "date_reference",
+        "devise",
+        "montant",
+        "Code du donneur d'ordre",
+        "donneur d'ordre",
+        "Bénéficiaire",
+        "pays_iso3",
+        "correspondant",
+        "matched_with",
+        "matched_type",
+        "source_pdf"
+    ]
+    
+    suspens_headers = [
+        "type_MT",
+        "reference",
+        "date_reference",
+        "devise",
+        "montant",
+        "Code du donneur d'ordre",
+        "donneur d'ordre",
+        "Bénéficiaire",
+        "pays_iso3",
+        "correspondant",
+        "status",
+        "source_pdf"
+    ]
+    
+    def _convert_date_to_excel(date_str):
+        if not date_str:
+            return None
+        try:
+            if isinstance(date_str, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                return datetime.strptime(date_str, '%Y-%m-%d')
+            return date_str
+        except Exception:
+            return date_str
+    
+    # Sheet 1: Transferts Exécutés (MT900 matchés)
+    exec_sheet = wb.active
+    exec_sheet.title = "Transferts_Executes"
+    exec_sheet.append(transfer_headers)
+    
+    for r in matched_rows:
+        date_ref = _convert_date_to_excel(r.get("date_reference"))
+        row_data = [
+            r.get("type_MT"),
+            r.get("reference"),
+            r.get("related_reference"),
+            date_ref,
+            r.get("devise"),
+            r.get("montant"),
+            r.get("code_donneur_dordre"),
+            r.get("donneur_dordre"),
+            r.get("beneficiaire"),
+            r.get("pays_iso3"),
+            r.get("correspondant"),
+            r.get("matched_with"),
+            r.get("matched_type"),
+            r.get("source_pdf")
+        ]
+        exec_sheet.append(row_data)
+        
+        if date_ref and isinstance(date_ref, datetime):
+            current_row = exec_sheet.max_row
+            exec_sheet.cell(row=current_row, column=4).number_format = 'DD/MM/YYYY'
+    
+    # Ajuster largeurs de colonnes
+    try:
+        for col_idx in range(1, len(transfer_headers) + 1):
+            max_len = max(
+                (len(str(cell.value)) for cell in exec_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                default=10
+            )
+            exec_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+    except Exception:
+        pass
+    
+    # Sheet 2: Suspens (MT202/MT103 sans correspondant)
+    if suspens_rows:
+        suspens_sheet = wb.create_sheet(title="Suspens")
+        suspens_sheet.append(suspens_headers)
+        
+        for r in suspens_rows:
+            date_ref = _convert_date_to_excel(r.get("date_reference"))
+            row_data = [
+                r.get("type_MT"),
+                r.get("reference"),
+                date_ref,
+                r.get("devise"),
+                r.get("montant"),
+                r.get("code_donneur_dordre"),
+                r.get("donneur_dordre"),
+                r.get("beneficiaire"),
+                r.get("pays_iso3"),
+                r.get("correspondant"),
+                r.get("status"),
+                r.get("source_pdf")
+            ]
+            suspens_sheet.append(row_data)
+            
+            if date_ref and isinstance(date_ref, datetime):
+                current_row = suspens_sheet.max_row
+                suspens_sheet.cell(row=current_row, column=3).number_format = 'DD/MM/YYYY'
+        
+        # Ajuster largeurs de colonnes
+        try:
+            for col_idx in range(1, len(suspens_headers) + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in suspens_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10
+                )
+                suspens_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+    
+    wb.save(out_path)
+    logger.info("Transfer analysis workbook created: %s (matched: %d, suspens: %d)", 
+                out_path, len(matched_rows), len(suspens_rows))
     return out_path

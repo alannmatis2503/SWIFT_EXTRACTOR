@@ -23,13 +23,33 @@ logger = logging.getLogger(__name__)
 # specialized extractors (block-level API: extract_block(block_text, source=...))
 from backend.app.extractors import mt202, mt103, mt910
 
+# Import MT900 for transfer analysis
+try:
+    from backend.app.extractors import mt900
+    HAS_MT900 = True
+except Exception:
+    mt900 = None
+    HAS_MT900 = False
+
 # optional bic mapping utilities (used only for 202/103 postprocessing)
 try:
     from backend.app.extractors import bic_utils
+    from backend.app.extractors.bic_utils import map_reglement_code, extract_4digit_code_from_f52d
     HAS_BIC_UTILS = True
 except Exception:
     bic_utils = None
+    map_reglement_code = None
+    extract_4digit_code_from_f52d = None
     HAS_BIC_UTILS = False
+
+# Import MT103 specific functions
+try:
+    from backend.app.extractors.mt103 import extract_donneur_from_f50, extract_donneur_outgoing_mt103
+    HAS_MT103_DONNEUR = True
+except Exception:
+    extract_donneur_from_f50 = None
+    extract_donneur_outgoing_mt103 = None
+    HAS_MT103_DONNEUR = False
 
 # ---------- patterns ----------
 # try to capture "Identifier: fin.202.COV" (we will extract the tail e.g. "202" or "202.COV")
@@ -255,6 +275,81 @@ def _check_f58a_323201(block_text: str) -> bool:
     return False
 
 
+def _check_eur_exception(row: Dict, direction: str) -> Optional[str]:
+    """
+    Vérifier si le message doit être mis en exception pour devise EUR.
+    Règles:
+    - T2PI dans la référence (entrant ou sortant) -> "intérêts"
+    - T2RM dans la référence (entrant seulement) -> "remboursement"
+    - T2PL dans la référence (sortant seulement) -> "placement"
+    
+    Returns:
+        Le commentaire d'exception ou None si pas d'exception
+    """
+    devise = row.get("devise")
+    reference = row.get("reference") or ""
+    
+    # Vérifier si devise est EUR
+    if not devise or devise.upper() != "EUR":
+        return None
+    
+    reference_upper = reference.upper()
+    
+    # T2PI -> intérêts (entrant ET sortant)
+    if "T2PI" in reference_upper:
+        return "intérêts"
+    
+    # T2RM -> remboursement (entrant seulement)
+    if direction == "incoming" and "T2RM" in reference_upper:
+        return "remboursement"
+    
+    # T2PL -> placement (sortant seulement)
+    if direction == "outgoing" and "T2PL" in reference_upper:
+        return "placement"
+    
+    return None
+
+
+def _check_nivellement_exception(row: Dict, block_text: str, direction: str) -> Optional[str]:
+    """
+    Vérifier si un MT910 doit être mis en exception pour nivellement.
+    Règles:
+    - Entrants: 5175 dans F25P (numéro de compte) ou NIVLT dans la référence
+    - Sortants: 5175 dans F53B ou F58A (numéro de compte)
+    
+    Returns:
+        "nivellement" si exception, None sinon
+    """
+    mt_type = row.get("type_MT") or ""
+    if not mt_type.startswith("fin.910"):
+        return None
+    
+    reference = row.get("reference") or ""
+    
+    if direction == "incoming":
+        # Vérifier NIVLT dans la référence
+        if "NIVLT" in reference.upper():
+            return "nivellement"
+        
+        # Vérifier 5175 dans F25P
+        f25p_block = get_field_block(block_text, 'F25P') or get_field_block(block_text, 'F25')
+        if f25p_block and "5175" in f25p_block:
+            return "nivellement"
+    
+    elif direction == "outgoing":
+        # Vérifier 5175 dans F53B
+        f53b_block = get_field_block(block_text, 'F53B') or get_field_block(block_text, 'F53')
+        if f53b_block and "5175" in f53b_block:
+            return "nivellement"
+        
+        # Vérifier 5175 dans F58A
+        f58a_block = get_field_block(block_text, 'F58A') or get_field_block(block_text, 'F58')
+        if f58a_block and "5175" in f58a_block:
+            return "nivellement"
+    
+    return None
+
+
 def _should_reject_mt103(row: Dict) -> bool:
     """
     RÈGLE 3: Pour MT103, rejeter si F53A, F54A ou F57A contient:
@@ -397,82 +492,106 @@ def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional
     """
     For MT202 / MT103 and variants (like 202.COV) : attempt to extract a strict Identifier
     token from F52A (or message text) using bic_utils.get_donneur_from_f52 (if available).
-    Cas particulier messages sortants: essayer F52D si F52A absent, et si le résultat est un mot invalide, extraire le nom réel.
+    
+    Pour MT202: Si F52A n'a pas de code BIC, on prend F52D et on check:
+    - D'abord un code BIC
+    - Sinon un code à 4 chiffres (matcher avec colonne Reglement)
+    Si rien n'est trouvé, laisser les champs vides.
+    
     If a CODE or CODE/Name is found, fill row['code_donneur_dordre'] (the code) and 
     row['donneur_dordre'] (the name only).
     """
     try:
-        f52_block = get_field_block(block_text, 'F52A')
-        f52d_block = None
-        f50f_block = None
-        # Cas particulier messages sortants: essayer F52D si F52A absent
-        if not f52_block:
-            f52_block = get_field_block(block_text, 'F52D')
-            f52d_block = f52_block
-        # Cas particulier MT103 sortants: essayer F50F
-        if not f52_block:
-            f52_block = get_field_block(block_text, 'F50F')
-            f50f_block = f52_block
+        f52a_block = get_field_block(block_text, 'F52A')
+        f52d_block = get_field_block(block_text, 'F52D')
+        f50f_block = get_field_block(block_text, 'F50F')
     except Exception:
-        f52_block = None
+        f52a_block = None
         f52d_block = None
         f50f_block = None
 
     code_name = None
     code_only = None
+    use_f52d = False
 
-    if HAS_BIC_UTILS:
+    # D'abord essayer F52A avec le code BIC
+    if HAS_BIC_UTILS and f52a_block:
         try:
             # bic_utils.get_donneur_from_f52 returns "CODE/Name" or CODE or None
-            code_name = bic_utils.get_donneur_from_f52(f52_block, message_text=block_text, xlsx_path=xlsx_path)
+            code_name = bic_utils.get_donneur_from_f52(f52a_block, message_text=None, xlsx_path=xlsx_path)  # Ne pas chercher dans tout le message
             
-            # Cas particulier: si code_name est un mot label invalide et on a F52D ou F50F, extraire le vrai nom
-            if code_name and (f52d_block or f50f_block) and HAS_NAME_EXTRACTORS:
+            # Vérifier si c'est un mot label invalide
+            if code_name:
                 code_name_upper = code_name.upper()
-                # Use set membership for O(1) lookup
                 if any(word in code_name_upper for word in _INVALID_DONNEUR_WORDS):
-                    name_from_field = None
-                    if f52d_block:
-                        name_from_field = extract_name_from_f52d(f52d_block)
-                    elif f50f_block:
-                        name_from_field = extract_name_from_f50f(f50f_block)
-                    
-                    if name_from_field:
-                        code_name = name_from_field
+                    code_name = None  # Invalide, continuer vers F52D
         except Exception as e:
-            logger.debug("mt_multi: bic_utils.get_donneur_from_f52 error: %s", e)
+            logger.debug("mt_multi: bic_utils.get_donneur_from_f52 error for F52A: %s", e)
             code_name = None
 
-    if not code_name:
-        # fallback naive search near label if bic_utils absent or returned None
-        m_label = re.search(r'(?i)(?:IdentifierCode|Identifier Code|Code d\'identifiant|Code d identifiant|Identifier code)\s*[:\-\s]*', block_text)
-        if m_label:
-            tail = block_text[m_label.end(): m_label.end() + 800]
-            m_tok = re.search(r'\b([A-Z0-9]{8,11})\b', tail, flags=re.I)
-            if m_tok:
-                code_only = m_tok.group(1).upper()
-                if HAS_BIC_UTILS:
-                    try:
-                        name = bic_utils.map_code_to_name(code_only, xlsx_path=xlsx_path)
-                    except Exception:
-                        name = None
-                    code_name = f"{code_only}/{name}" if name else code_only
-                else:
-                    code_name = code_only
-
-    if code_name:
-        # Extract code and name separately
-        if '/' in code_name:
-            code_only, name_only = code_name.split('/', 1)
-        else:
-            code_only = code_name
-            name_only = None
+    # Si pas de résultat avec F52A, essayer F52D
+    if not code_name and f52d_block:
+        use_f52d = True
         
-        row["code_donneur_dordre"] = code_only
-        row["donneur_dordre"] = name_only if name_only else code_only
-        row["institution_name"] = name_only if name_only else code_only
-        if not row.get("code_banque"):
-            row["code_banque"] = code_only
+        # D'abord chercher un code BIC dans F52D
+        bic_match = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f52d_block)
+        if bic_match:
+            bic_code = bic_match.group(1).upper()
+            if HAS_BIC_UTILS:
+                try:
+                    name = bic_utils.map_code_to_name(bic_code, xlsx_path=xlsx_path)
+                    code_name = f"{bic_code}/{name}" if name else bic_code
+                except Exception:
+                    code_name = bic_code
+            else:
+                code_name = bic_code
+        
+        # Si pas de BIC, chercher un code 4 chiffres
+        if not code_name and HAS_BIC_UTILS and extract_4digit_code_from_f52d:
+            code_4 = extract_4digit_code_from_f52d(f52d_block)
+            if code_4:
+                # Mapper avec la colonne Reglement
+                reglement_info = map_reglement_code(code_4, xlsx_path=xlsx_path)
+                if reglement_info:
+                    code_name = f"{code_4}/{reglement_info.get('name', '')}"
+                    # Stocker aussi le pays si trouvé
+                    if reglement_info.get('country') and not row.get('pays_iso3'):
+                        row['pays_iso3'] = reglement_info['country']
+                else:
+                    # Code 4 chiffres trouvé mais pas de mapping
+                    code_name = code_4
+        
+        # Fallback: extraire le nom de F52D si disponible
+        if not code_name and HAS_NAME_EXTRACTORS:
+            name_from_f52d = extract_name_from_f52d(f52d_block)
+            if name_from_f52d:
+                code_name = name_from_f52d
+
+    # Fallback vers F50F pour MT103
+    if not code_name and f50f_block and HAS_NAME_EXTRACTORS:
+        name_from_f50f = extract_name_from_f50f(f50f_block)
+        if name_from_f50f:
+            code_name = name_from_f50f
+
+    if not code_name:
+        # Si toujours rien, laisser les champs vides (ne pas chercher ailleurs)
+        row["code_donneur_dordre"] = None
+        row["donneur_dordre"] = None
+        row["institution_name"] = None
+        return row
+
+    # Extract code and name separately from code_name
+    if '/' in str(code_name):
+        code_only, name_only = str(code_name).split('/', 1)
+    else:
+        code_only = str(code_name)
+        name_only = None
+    
+    row["code_donneur_dordre"] = code_only
+    row["donneur_dordre"] = name_only if name_only else code_only
+    row["institution_name"] = name_only if name_only else code_only
+    if not row.get("code_banque"):
+        row["code_banque"] = code_only
     
     return row
 
@@ -544,14 +663,15 @@ def _extract_f52a_for_mt910(row: Dict, block_text: str, xlsx_path: Optional[str]
     return row
 
 
-def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, direction: str = "incoming") -> tuple[List[Dict], List[Dict], List[Dict], Dict[str, set]]:
+def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, direction: str = "incoming") -> tuple[List[Dict], List[Dict], List[Dict], List[Dict], Dict[str, set]]:
     """
     Main entrypoint: read pdf_path, split into messages, dispatch to extractors.
     bic_xlsx: optional path forwarded to bic_utils when used in postprocessing.
     direction: "incoming" or "outgoing" - determines beneficiary extraction logic
     
     Returns:
-        tuple: (list of extracted rows, list of BEACCMCX091 rows, list of 323201 exception rows, dict with 'unmapped' and 'empty' code sets)
+        tuple: (list of extracted rows, list of BEACCMCX091 rows, list of 323201 exception rows, 
+                list of other exceptions (EUR/nivellement), dict with 'unmapped' and 'empty' code sets)
     """
     pdf_path = Path(pdf_path)
     if not pdf_path.exists():
@@ -570,13 +690,14 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
     rows: List[Dict] = []
     beaccmcx091_rows: List[Dict] = []  # Messages BEACCMCX091 séparés
     exception_323201_rows: List[Dict] = []  # Messages 202 entrants avec 323201 dans F58A
+    other_exceptions_rows: List[Dict] = []  # Autres exceptions (EUR T2PI/T2RM/T2PL, nivellement)
     missing_codes: Dict[str, set] = {
         "unmapped": set(),  # codes found but no name mapping
         "empty": set()      # no code found at all
     }
     
     # RÈGLE 1: Types valides à accepter
-    VALID_BASE_TYPES = {'202', '103', '910'}
+    VALID_BASE_TYPES = {'202', '103', '910', '900'}
 
     for i, blk in enumerate(blocks, start=1):
         # Format: "voir message N°X du fichier filename.pdf" (multi) or just "filename.pdf" (single)
@@ -625,8 +746,40 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
 
             elif mt_type_token == '103':
                 row = mt103.extract_block(blk, source=source_label)
-                row = _postprocess_row_for_202_103(row, blk, xlsx_path=bic_xlsx)
-                # Pour MT103 sortants: bénéficiaire vide (à implémenter plus tard)
+                
+                # Traitement spécifique du donneur d'ordre pour MT103
+                if HAS_MT103_DONNEUR:
+                    if direction == "incoming":
+                        # Entrants: F50K ou F50F
+                        code_bic, nom_donneur = extract_donneur_from_f50(blk)
+                        if code_bic:
+                            row["code_donneur_dordre"] = code_bic
+                            if HAS_BIC_UTILS:
+                                name = bic_utils.map_code_to_name(code_bic, xlsx_path=bic_xlsx)
+                                row["donneur_dordre"] = name if name else nom_donneur
+                            else:
+                                row["donneur_dordre"] = nom_donneur
+                        elif nom_donneur:
+                            row["donneur_dordre"] = nom_donneur
+                            row["code_donneur_dordre"] = None
+                    else:
+                        # Sortants: F52A d'abord, sinon F50F
+                        code_bic, nom_donneur = extract_donneur_outgoing_mt103(blk)
+                        if code_bic:
+                            row["code_donneur_dordre"] = code_bic
+                            if HAS_BIC_UTILS:
+                                name = bic_utils.map_code_to_name(code_bic, xlsx_path=bic_xlsx)
+                                row["donneur_dordre"] = name if name else nom_donneur
+                            else:
+                                row["donneur_dordre"] = nom_donneur
+                        elif nom_donneur:
+                            row["donneur_dordre"] = nom_donneur
+                            row["code_donneur_dordre"] = None
+                else:
+                    # Fallback: utiliser l'ancienne logique
+                    row = _postprocess_row_for_202_103(row, blk, xlsx_path=bic_xlsx)
+                
+                # Pour MT103 sortants: bénéficiaire vide
                 if direction == "outgoing":
                     row["beneficiaire"] = None
             elif mt_type_token == '910':
@@ -744,6 +897,22 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                 logger.debug("mt_multi: Message %s identifié avec 323201 dans F58A (exception)", source_label)
                 is_exception_323201 = True
 
+        # NOUVELLE RÈGLE: Exceptions EUR (T2PI, T2RM, T2PL)
+        is_eur_exception = False
+        eur_comment = _check_eur_exception(row, direction)
+        if eur_comment:
+            logger.debug("mt_multi: Message %s identifié comme exception EUR (%s)", source_label, eur_comment)
+            row["commentaires"] = eur_comment
+            is_eur_exception = True
+        
+        # NOUVELLE RÈGLE: Exceptions nivellement pour MT910
+        is_nivellement_exception = False
+        nivellement_comment = _check_nivellement_exception(row, blk, direction)
+        if nivellement_comment:
+            logger.debug("mt_multi: Message %s identifié comme exception nivellement", source_label)
+            row["commentaires"] = nivellement_comment
+            is_nivellement_exception = True
+
         # Post-traitement: remplir pays_iso3 depuis code_donneur_dordre si absent
         row = _fill_country_from_code(row, xlsx_path=bic_xlsx)
 
@@ -768,12 +937,166 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
         # Ajouter le message à la liste appropriée
         if is_exception_323201:
             exception_323201_rows.append(row)
+        elif is_eur_exception or is_nivellement_exception:
+            other_exceptions_rows.append(row)
         elif is_beaccmcx091:
             beaccmcx091_rows.append(row)
         else:
             rows.append(row)
 
-    return rows, beaccmcx091_rows, exception_323201_rows, missing_codes
+    return rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, missing_codes
+
+
+def extract_transfer_analysis(pdf_path: Path, bic_xlsx: Optional[str] = None) -> tuple[List[Dict], List[Dict], Dict[str, set]]:
+    """
+    Analyse des transferts sortants exécutés.
+    
+    1. Extrait les fin.900 (confirmations de débit) en priorité
+    2. Extrait les 202 et 103
+    3. Match les 900 avec les 202/103 via la référence d'origine (F21)
+    4. Remplit les infos manquantes dans les 900 à partir des 202/103 matchés
+    5. Les 202/103 sans correspondant 900 vont dans "suspens"
+    
+    Args:
+        pdf_path: Path to PDF file
+        bic_xlsx: Optional path to BIC codes Excel
+        
+    Returns:
+        tuple: (matched_900_rows, suspens_rows, missing_codes)
+    """
+    pdf_path = Path(pdf_path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(pdf_path)
+    
+    # Preload BIC mapping if available
+    if HAS_BIC_UTILS:
+        try:
+            bic_utils.load_bic_mapping(bic_xlsx)
+        except Exception as e:
+            logger.debug("mt_multi: bic mapping preload failed: %s", e)
+    
+    text = _safe_text_extract(pdf_path)
+    blocks = _split_messages(text)
+    multi = len(blocks) > 1
+    
+    # Collections pour stocker les différents types
+    mt900_rows: List[Dict] = []
+    mt202_103_rows: List[Dict] = []
+    missing_codes: Dict[str, set] = {"unmapped": set(), "empty": set()}
+    
+    for i, blk in enumerate(blocks, start=1):
+        if multi:
+            source_label = f"voir message N°{i} du fichier {pdf_path.name}"
+        else:
+            source_label = pdf_path.name
+        
+        mt_type_token = _detect_mt_type(blk)
+        
+        if not mt_type_token:
+            continue
+        
+        try:
+            if mt_type_token == '900' and HAS_MT900:
+                # Extraire MT900
+                row = mt900.extract_block(blk, source=source_label)
+                row["source_pdf"] = source_label
+                mt900_rows.append(row)
+                
+            elif mt_type_token.startswith('202'):
+                # Extraire MT202
+                row = mt202.extract_block(blk, source=source_label)
+                row = _postprocess_row_for_202_103(row, blk, xlsx_path=bic_xlsx)
+                if '.' in mt_type_token:
+                    row['type_MT'] = f"fin.{mt_type_token}"
+                else:
+                    row.setdefault('type_MT', 'fin.202')
+                row["source_pdf"] = source_label
+                mt202_103_rows.append(row)
+                
+            elif mt_type_token == '103':
+                # Extraire MT103
+                row = mt103.extract_block(blk, source=source_label)
+                row = _postprocess_row_for_202_103(row, blk, xlsx_path=bic_xlsx)
+                row["source_pdf"] = source_label
+                mt202_103_rows.append(row)
+                
+        except Exception as e:
+            logger.exception("mt_multi: transfer analysis extractor failed for %s: %s", source_label, e)
+            continue
+    
+    # Créer un index des 202/103 par référence pour le matching rapide
+    ref_index: Dict[str, Dict] = {}
+    for row in mt202_103_rows:
+        ref = row.get("reference")
+        if ref:
+            ref_key = str(ref).strip().upper()
+            ref_index[ref_key] = row
+    
+    # Matcher les 900 avec les 202/103
+    matched_900_rows: List[Dict] = []
+    matched_refs: set = set()
+    
+    for mt900_row in mt900_rows:
+        # La référence d'origine F21 est utilisée pour matcher
+        related_ref = mt900_row.get("related_reference")
+        
+        if related_ref:
+            ref_key = str(related_ref).strip().upper()
+            
+            if ref_key in ref_index:
+                # Match trouvé ! Compléter les infos du 900 avec celles du 202/103
+                matched_202_103 = ref_index[ref_key]
+                
+                # Copier les infos manquantes du 202/103 vers le 900
+                fields_to_copy = [
+                    "code_donneur_dordre", "donneur_dordre", "beneficiaire", 
+                    "pays_iso3", "correspondant"
+                ]
+                for field in fields_to_copy:
+                    if not mt900_row.get(field) and matched_202_103.get(field):
+                        mt900_row[field] = matched_202_103[field]
+                
+                # Si montant/devise manquant dans 900, prendre du 202/103
+                if not mt900_row.get("montant") and matched_202_103.get("montant"):
+                    mt900_row["montant"] = matched_202_103["montant"]
+                if not mt900_row.get("devise") and matched_202_103.get("devise"):
+                    mt900_row["devise"] = matched_202_103["devise"]
+                
+                # Ajouter info de matching
+                mt900_row["matched_with"] = matched_202_103.get("reference")
+                mt900_row["matched_type"] = matched_202_103.get("type_MT")
+                
+                matched_refs.add(ref_key)
+        
+        matched_900_rows.append(mt900_row)
+    
+    # Les 202/103 non matchés vont dans suspens
+    suspens_rows: List[Dict] = []
+    for row in mt202_103_rows:
+        ref = row.get("reference")
+        if ref:
+            ref_key = str(ref).strip().upper()
+            if ref_key not in matched_refs:
+                row["status"] = "suspens - pas de confirmation 900"
+                suspens_rows.append(row)
+        else:
+            # Pas de référence = suspens
+            row["status"] = "suspens - référence manquante"
+            suspens_rows.append(row)
+    
+    # Track missing codes
+    for row in matched_900_rows + suspens_rows:
+        code = row.get("code_donneur_dordre")
+        name = row.get("donneur_dordre")
+        if not code:
+            missing_codes["empty"].add("(vide)")
+        elif name == code:
+            missing_codes["unmapped"].add(code)
+    
+    logger.info("Transfer analysis: %d MT900, %d matched, %d suspens", 
+                len(mt900_rows), len(matched_900_rows), len(suspens_rows))
+    
+    return matched_900_rows, suspens_rows, missing_codes
 
 
 # quick CLI for manual test

@@ -114,23 +114,64 @@ async def upload(
     rows = []
     beaccmcx091_rows = []
     exception_323201_rows = []
+    other_exceptions_rows = []
     for up in files:
         dest = RAW_DIR / up.filename
         with open(dest, "wb") as f:
             shutil.copyfileobj(up.file, f)
         logger.info(f"Saved upload {up.filename} (direction: {direction}, date_start: {date_start}, date_end: {date_end})")
-        file_rows, file_beac_rows, file_exc_rows, _ = extract_dispatch(dest, direction=direction)
+        file_rows, file_beac_rows, file_exc_rows, file_other_exc_rows, _ = extract_dispatch(dest, direction=direction)
         rows.extend(file_rows)
         beaccmcx091_rows.extend(file_beac_rows)
         exception_323201_rows.extend(file_exc_rows)
+        other_exceptions_rows.extend(file_other_exc_rows)
     
     # Filtrer par plage de dates si spécifiée
     if date_start or date_end:
         rows = _filter_by_date_range(rows, date_start, date_end)
         beaccmcx091_rows = _filter_by_date_range(beaccmcx091_rows, date_start, date_end)
         exception_323201_rows = _filter_by_date_range(exception_323201_rows, date_start, date_end)
+        other_exceptions_rows = _filter_by_date_range(other_exceptions_rows, date_start, date_end)
     
-    out_file = create_workbook(rows, OUT_DIR, direction=direction, beaccmcx091_rows=beaccmcx091_rows, exception_323201_rows=exception_323201_rows, date_start=date_start, date_end=date_end)
+    out_file = create_workbook(rows, OUT_DIR, direction=direction, beaccmcx091_rows=beaccmcx091_rows, exception_323201_rows=exception_323201_rows, other_exceptions_rows=other_exceptions_rows, date_start=date_start, date_end=date_end)
+    return FileResponse(str(out_file), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=out_file.name)
+
+@router.post("/upload_transfer_analysis")
+async def upload_transfer_analysis(
+    files: List[UploadFile] = File(...),
+    date_start: str = Form(None),
+    date_end: str = Form(None),
+    current = Depends(require_role("user"))
+):
+    """
+    Analyse des transferts sortants exécutés.
+    Extrait les MT900 et les matche avec les MT202/MT103.
+    Les messages sans correspondant vont dans la feuille "suspens".
+    """
+    from .extractor_manager import create_transfer_analysis_workbook, extract_transfer_analysis_dispatch
+    
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    
+    matched_rows = []
+    suspens_rows = []
+    
+    for up in files:
+        dest = RAW_DIR / up.filename
+        with open(dest, "wb") as f:
+            shutil.copyfileobj(up.file, f)
+        logger.info(f"Saved upload {up.filename} for transfer analysis (date_start: {date_start}, date_end: {date_end})")
+        
+        file_matched, file_suspens, _ = extract_transfer_analysis_dispatch(dest)
+        matched_rows.extend(file_matched)
+        suspens_rows.extend(file_suspens)
+    
+    # Filtrer par plage de dates si spécifiée
+    if date_start or date_end:
+        matched_rows = _filter_by_date_range(matched_rows, date_start, date_end)
+        suspens_rows = _filter_by_date_range(suspens_rows, date_start, date_end)
+    
+    out_file = create_transfer_analysis_workbook(matched_rows, suspens_rows, OUT_DIR, date_start=date_start, date_end=date_end)
     return FileResponse(str(out_file), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=out_file.name)
 
 @router.get("/runs")

@@ -49,24 +49,32 @@ st.markdown(
 st.markdown("### 📨 Type de messages")
 direction = st.radio(
     "Sélectionnez le type de messages à extraire",
-    ("incoming", "outgoing"),
-    format_func=lambda x: "📥 Messages Entrants (MT202, MT103, MT910)" if x == "incoming" else "📤 Messages Sortants (MT202, MT103, MT910)",
+    ("incoming", "outgoing", "transfer_analysis"),
+    format_func=lambda x: "📥 Messages Entrants (MT202, MT103, MT910)" if x == "incoming" else ("📤 Messages Sortants (MT202, MT103, MT910)" if x == "outgoing" else "🔄 Analyse Transferts Sortants Exécutés (MT202/MT103 + fin.900)"),
     horizontal=True
 )
 
 if direction == "incoming":
     st.info("**Messages entrants** : Pour les MT202, le bénéficiaire sera vide. Pour les MT910, le bénéficiaire sera identique au donneur d'ordre.")
-else:
+elif direction == "outgoing":
     st.info("**Messages sortants** : Pour les MT202, le bénéficiaire sera extrait depuis F58A. Pour les MT103, le bénéficiaire sera vide (à implémenter). Pour les MT910, le bénéficiaire sera identique au donneur d'ordre.")
+else:
+    st.info("**Analyse Transferts Exécutés** : Compare les MT202/MT103 sortants avec leurs confirmations fin.900 pour vérifier l'exécution. Génère une feuille de suspens pour les transferts non confirmés.")
 
 # File uploader (multiple)
 uploaded_files = st.file_uploader("Choisir des fichiers PDF", type="pdf", accept_multiple_files=True)
 
-# Date filter
-st.markdown("### 📅 Filtre par date")
+# Date filter - Plage de dates
+st.markdown("### 📅 Filtre par plage de dates (optionnel)")
 from datetime import date as date_type
-default_date = date_type.today()
-selected_date = st.date_input("Sélectionner une date de valeur", value=default_date)
+
+date_col1, date_col2 = st.columns(2)
+with date_col1:
+    date_start = st.date_input("Date de début", value=None, help="Laissez vide pour ne pas filtrer par date de début")
+with date_col2:
+    date_end = st.date_input("Date de fin", value=None, help="Laissez vide pour ne pas filtrer par date de fin")
+
+st.caption("💡 Laissez les deux dates vides pour extraire tous les messages. Vous pouvez spécifier une seule date (début ou fin) ou les deux.")
 
 col1, col2 = st.columns([1, 1])
 with col1:
@@ -103,6 +111,9 @@ if run_button:
         st.warning("Aucun fichier sélectionné.")
     else:
         rows = []
+        beaccmcx091_all = []  # Tous les messages BEACCMCX091
+        exception_323201_all = []  # Toutes les exceptions 323201
+        other_exceptions_all = []  # Autres exceptions (EUR/nivellement)
         progress = st.progress(0)
         total = len(uploaded_files)
         idx = 0
@@ -125,12 +136,31 @@ if run_button:
                 continue
 
             try:
-                # extract_dispatch retourne (rows, missing_codes) avec support du paramètre direction
-                new_rows, missing_codes = extract_dispatch(tmp_path, direction=direction)
+                # Choisir la fonction selon le mode
+                if direction == "transfer_analysis":
+                    # Mode analyse des transferts sortants exécutés
+                    from backend.app.extractor_manager import extract_transfer_analysis_dispatch
+                    new_rows, suspens_rows, missing_codes = extract_transfer_analysis_dispatch(tmp_path)
+                    beaccmcx091_rows = []
+                    exception_323201_rows = []
+                    other_exceptions_rows = []
+                    # Stocker les suspens pour plus tard
+                    if not hasattr(st.session_state, 'suspens_rows'):
+                        st.session_state.suspens_rows = []
+                    st.session_state.suspens_rows.extend(suspens_rows)
+                else:
+                    # Mode standard (incoming/outgoing)
+                    # extract_dispatch retourne (rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, missing_codes)
+                    new_rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, missing_codes = extract_dispatch(tmp_path, direction=direction)
 
                 # Accumulate missing codes
                 all_missing_codes["unmapped"].update(missing_codes.get("unmapped", set()))
                 all_missing_codes["empty"].update(missing_codes.get("empty", set()))
+                
+                # Accumulate exception rows
+                beaccmcx091_all.extend(beaccmcx091_rows)
+                exception_323201_all.extend(exception_323201_rows)
+                other_exceptions_all.extend(other_exceptions_rows)
 
                 # Normalisations/garanties : mêmes clés pour chaque row, et source_pdf bien renseigné
                 for r in new_rows:
@@ -178,12 +208,35 @@ if run_button:
 
         progress.empty()
 
-        # Filter rows by selected date
-        if selected_date:
-            selected_date_str = selected_date.strftime("%Y-%m-%d")
-            rows_filtered = [r for r in rows if r.get("date_reference") == selected_date_str]
-            if len(rows_filtered) < len(rows):
-                st.info(f"📅 Filtrage appliqué : {len(rows_filtered)} message(s) pour la date {selected_date_str} (sur {len(rows)} total)")
+        # Filter rows by date range
+        if date_start or date_end:
+            original_count = len(rows)
+            rows_filtered = []
+            
+            date_start_str = date_start.strftime("%Y-%m-%d") if date_start else None
+            date_end_str = date_end.strftime("%Y-%m-%d") if date_end else None
+            
+            for r in rows:
+                row_date = r.get("date_reference")
+                if not row_date:
+                    continue  # Skip rows without date
+                
+                # Apply filters
+                if date_start_str and row_date < date_start_str:
+                    continue
+                if date_end_str and row_date > date_end_str:
+                    continue
+                rows_filtered.append(r)
+            
+            if len(rows_filtered) < original_count:
+                filter_desc = ""
+                if date_start_str and date_end_str:
+                    filter_desc = f"du {date_start_str} au {date_end_str}"
+                elif date_start_str:
+                    filter_desc = f"à partir du {date_start_str}"
+                else:
+                    filter_desc = f"jusqu'au {date_end_str}"
+                st.info(f"📅 Filtrage appliqué : {len(rows_filtered)} message(s) {filter_desc} (sur {original_count} total)")
             rows = rows_filtered
         
         # assemble display DataFrame (map internal keys -> user-facing labels)
@@ -279,7 +332,19 @@ if run_button:
                 # create workbook in a temp directory and provide download
                 temp_outdir = Path(tempfile.mkdtemp(prefix="swift_out_"))
                 try:
-                    out_path = create_workbook(rows, temp_outdir, direction=direction)  # returns Path to created workbook
+                    if direction == "transfer_analysis":
+                        # Mode analyse des transferts - utiliser create_transfer_analysis_workbook
+                        from backend.app.extractor_manager import create_transfer_analysis_workbook
+                        suspens = getattr(st.session_state, 'suspens_rows', [])
+                        out_path = create_transfer_analysis_workbook(rows, suspens, temp_outdir)
+                        # Reset suspens
+                        st.session_state.suspens_rows = []
+                    else:
+                        # Mode standard - passer les listes d'exceptions
+                        out_path = create_workbook(rows, temp_outdir, direction=direction, 
+                                                   beaccmcx091_rows=beaccmcx091_all,
+                                                   exception_323201_rows=exception_323201_all,
+                                                   other_exceptions_rows=other_exceptions_all)
                     with open(out_path, "rb") as f:
                         data = f.read()
                     st.download_button(
@@ -291,6 +356,8 @@ if run_button:
                     st.info(f"Workbook généré: {out_path.name} (temp)")
                 except Exception as e:
                     st.error(f"Impossible de créer le workbook: {e}")
+                    with st.expander("Détails de l'erreur"):
+                        st.text(traceback.format_exc())
                 finally:
                     # optional: remove temp_outdir after offering download (download keeps data in browser)
                     try:
@@ -302,12 +369,23 @@ if run_button:
                 outdir = Path(custom_out) if custom_out else (ROOT / "output" / "tables")
                 outdir.mkdir(parents=True, exist_ok=True)
                 try:
-                    outpath = create_workbook(rows, outdir, direction=direction)
+                    if direction == "transfer_analysis":
+                        from backend.app.extractor_manager import create_transfer_analysis_workbook
+                        suspens = getattr(st.session_state, 'suspens_rows', [])
+                        outpath = create_transfer_analysis_workbook(rows, suspens, outdir)
+                        st.session_state.suspens_rows = []
+                    else:
+                        outpath = create_workbook(rows, outdir, direction=direction,
+                                                  beaccmcx091_rows=beaccmcx091_all,
+                                                  exception_323201_rows=exception_323201_all,
+                                                  other_exceptions_rows=other_exceptions_all)
                     st.success(f"Workbook enregistré : {outpath}")
                     st.write("Fichiers présents dans", outdir)
                     st.write(sorted([p.name for p in outdir.glob("*.xlsx")], reverse=True))
                 except Exception as e:
                     st.error(f"Impossible d'enregistrer le workbook sur le serveur: {e}")
+                    with st.expander("Détails de l'erreur"):
+                        st.text(traceback.format_exc())
 
         else:
             st.warning("Aucun résultat extrait. Vérifiez le format des PDFs ou les logs.")

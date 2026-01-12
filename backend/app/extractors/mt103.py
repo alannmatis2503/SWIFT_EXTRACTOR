@@ -140,6 +140,114 @@ def parse_f52a_or_f50f_institution(text: str) -> Optional[str]:
 
     return None
 
+
+def extract_donneur_from_f50(text: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extraire le donneur d'ordre depuis F50K ou F50F pour MT103 entrants.
+    Cherche d'abord un code BIC dans ces champs, puis le nom.
+    Ne cherche PAS de BIC dans d'autres champs.
+    
+    Returns:
+        tuple: (code_bic, nom_donneur)
+    """
+    # Essayer F50K d'abord, puis F50F, puis F50
+    f50_block = get_field_block(text, 'F50K') or get_field_block(text, 'F50F') or get_field_block(text, 'F50')
+    
+    if not f50_block:
+        return None, None
+    
+    code_bic = None
+    nom_donneur = None
+    
+    # Chercher un code BIC (8-11 caractères, lettres majuscules et chiffres)
+    bic_match = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f50_block)
+    if bic_match:
+        code_bic = bic_match.group(1).upper()
+    
+    # Extraire le nom du donneur d'ordre
+    lines = [l.strip() for l in f50_block.splitlines() if l.strip()]
+    name_candidates = []
+    
+    for ln in lines:
+        up = ln.upper()
+        # Ignorer les lignes de label
+        if any(skip in up for skip in ['NAMEANDADDRESS', 'PARTYIDENTIFIER', 'NUMBER', 'COMPTE', 'IDENTIFIERCODE', 'IDENTIFIER CODE']):
+            continue
+        # Ignorer les lignes qui ressemblent à des codes BIC
+        if re.fullmatch(r'[A-Z0-9]{8,11}', ln.replace(' ', '')):
+            continue
+        # Ignorer les lignes commençant par /
+        if ln.startswith('/'):
+            continue
+        # Garder les lignes avec du texte significatif
+        if len(ln) >= 3 and re.search(r'[A-Za-z]', ln):
+            name_candidates.append(ln)
+    
+    if name_candidates:
+        # Prendre les 2 premières lignes significatives pour le nom
+        nom_donneur = ' '.join(name_candidates[:2]).strip()
+    
+    return code_bic, nom_donneur
+
+
+def extract_donneur_outgoing_mt103(text: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extraire le donneur d'ordre pour MT103 sortants.
+    Priorité: F52A, sinon F50F.
+    Ne cherche PAS de BIC dans d'autres champs.
+    
+    Returns:
+        tuple: (code_bic, nom_donneur)
+    """
+    # Essayer F52A d'abord
+    f52a_block = get_field_block(text, 'F52A')
+    
+    if f52a_block:
+        # Chercher un code BIC dans F52A
+        bic_match = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f52a_block)
+        if bic_match:
+            code_bic = bic_match.group(1).upper()
+            # Utiliser get_donneur_from_f52 pour obtenir le nom mappé
+            donneur = get_donneur_from_f52(f52a_block, message_text=None)  # Ne pas chercher dans tout le message
+            if donneur and not any(word in donneur.upper() for word in _INVALID_DONNEUR_WORDS_MT103):
+                if '/' in donneur:
+                    _, nom = donneur.split('/', 1)
+                    return code_bic, nom
+                return code_bic, donneur
+            return code_bic, None
+    
+    # Fallback: F50F
+    f50f_block = get_field_block(text, 'F50F') or get_field_block(text, 'F50')
+    if f50f_block:
+        code_bic = None
+        nom_donneur = None
+        
+        # Chercher un code BIC dans F50F
+        bic_match = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f50f_block)
+        if bic_match:
+            code_bic = bic_match.group(1).upper()
+        
+        # Extraire le nom
+        lines = [l.strip() for l in f50f_block.splitlines() if l.strip()]
+        name_candidates = []
+        for ln in lines:
+            up = ln.upper()
+            if any(skip in up for skip in ['NAMEANDADDRESS', 'PARTYIDENTIFIER', 'NUMBER', 'COMPTE', 'IDENTIFIERCODE']):
+                continue
+            if re.fullmatch(r'[A-Z0-9]{8,11}', ln.replace(' ', '')):
+                continue
+            if ln.startswith('/'):
+                continue
+            if len(ln) >= 3 and re.search(r'[A-Za-z]', ln):
+                name_candidates.append(ln)
+        
+        if name_candidates:
+            nom_donneur = ' '.join(name_candidates[:2]).strip()
+        
+        return code_bic, nom_donneur
+    
+    return None, None
+
 def extract_from_text(text: str, source: str = None) -> dict:
     row = {
         "type_MT": None,
