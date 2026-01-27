@@ -11,19 +11,19 @@ from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import numbers
 
-from .utils import logger
+from utils import logger
 
 # import extractors (primary helpers)
-from .extractors.mt202 import extract_for_mt202, extract_text_from_pdf as extract_text_mt202
+from backend.app.extractors.mt202 import extract_for_mt202, extract_text_from_pdf as extract_text_mt202
 try:
-    from .extractors.mt103 import extract_for_mt103
+    from backend.app.extractors.mt103 import extract_for_mt103
     HAS_MT103 = True
 except Exception:
     HAS_MT103 = False
     logger.info("mt103 extractor not available at import time; you can add it to EXTRACTOR_MAP later.")
 
 try:
-    from .extractors.mt910 import extract_for_mt910
+    from backend.app.extractors.mt910 import extract_for_mt910
     HAS_MT910 = True
 except Exception:
     HAS_MT910 = False
@@ -31,7 +31,7 @@ except Exception:
 
 # try to import the multi-message extractor (optional)
 try:
-    from .extractors import mt_multi as mt_multi_module
+    from backend.app.extractors import mt_multi as mt_multi_module
     HAS_MT_MULTI = True
 except Exception:
     mt_multi_module = None
@@ -397,7 +397,8 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
             blocks = mt_multi_module._split_messages(text)
             if blocks and len(blocks) > 1:
                 logger.info("%s: detected %d messages (using mt_multi).", p.name, len(blocks))
-                rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction)
+                # Pass preloaded_text to avoid re-reading the PDF
+                rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction, preloaded_text=text)
                 # ensure backward compatibility: set institution_name from donneur_dordre if missing
                 for r in rows:
                     if "institution_name" not in r or not r.get("institution_name"):
@@ -648,9 +649,67 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
             current_row = sheet.max_row
             sheet.cell(row=current_row, column=2).number_format = 'DD/MM/YYYY'
 
-    # write summary rows
+    # NOUVELLE FONCTIONNALITÉ: Détection des doublons potentiels (910 vs 202)
+    # ÉTAPE 1: Détecter les doublons AVANT d'écrire dans summary
+    # Combiner toutes les rows pour la détection
+    all_rows_for_duplicates = list(rows) + (beaccmcx091_rows or []) + (exception_323201_rows or []) + (other_exceptions_rows or [])
+    
+    # Créer des groupes par (référence, montant) pour détecter les doublons
+    potential_duplicates = []
+    seen_keys = {}
+    rows_to_exclude_from_summary = set()  # IDs des messages à exclure de summary
+    rows_to_mark_as_duplicate = set()  # IDs des messages à marquer "potentiel doublon"
+    
+    # Utiliser id() pour identifier de manière unique chaque dictionnaire
+    for r in all_rows_for_duplicates:
+        mt_type = r.get("type_MT") or ""
+        montant = r.get("montant")
+        
+        # Pour les MT910, utiliser F20 comme référence (déjà fait dans l'extraction)
+        reference = r.get("reference")
+        
+        if reference and montant is not None:
+            # Normaliser la clé
+            key = (str(reference).strip().upper(), float(montant) if montant else 0)
+            
+            if key in seen_keys:
+                # Doublon potentiel trouvé
+                prev_row = seen_keys[key]
+                prev_type = prev_row.get("type_MT") or ""
+                
+                # Un doublon est si c'est un 910 vs 202 (ou l'inverse)
+                is_910_vs_202 = (
+                    ("910" in mt_type and "202" in prev_type) or
+                    ("202" in mt_type and "910" in prev_type)
+                )
+                
+                if is_910_vs_202:
+                    # Ajouter les deux dans la liste des doublons potentiels
+                    if prev_row not in potential_duplicates:
+                        potential_duplicates.append(prev_row)
+                    if r not in potential_duplicates:
+                        potential_duplicates.append(r)
+                    
+                    # NOUVELLE LOGIQUE: Exclure le second du summary, marquer le premier
+                    # On garde le premier message vu (prev_row) et on exclut le second (r)
+                    rows_to_exclude_from_summary.add(id(r))
+                    rows_to_mark_as_duplicate.add(id(prev_row))
+            else:
+                seen_keys[key] = r
+    
+    # ÉTAPE 2: Modifier les commentaires des messages à marquer
+    for r in all_rows_for_duplicates:
+        if id(r) in rows_to_mark_as_duplicate:
+            current_comment = r.get("commentaires") or ""
+            if current_comment:
+                r["commentaires"] = f"{current_comment} / potentiel doublon"
+            else:
+                r["commentaires"] = "potentiel doublon"
+    
+    # ÉTAPE 3: Écrire les rows dans summary (en excluant les doublons)
     for r in rows:
-        _write_row_to_sheet(summary, r)
+        if id(r) not in rows_to_exclude_from_summary:
+            _write_row_to_sheet(summary, r)
 
     # Add BEACCMCX091 sheet if there are any (right after main summary, before country summaries)
     if beaccmcx091_rows and len(beaccmcx091_rows) > 0:
@@ -658,7 +717,8 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         beac_sheet.append(display_headers)
         
         for r in beaccmcx091_rows:
-            _write_row_to_sheet(beac_sheet, r)
+            if id(r) not in rows_to_exclude_from_summary:
+                _write_row_to_sheet(beac_sheet, r)
         
         # Adjust column widths for BEACCMCX091 sheet
         try:
@@ -677,7 +737,8 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         exc_sheet.append(display_headers)
         
         for r in exception_323201_rows:
-            _write_row_to_sheet(exc_sheet, r)
+            if id(r) not in rows_to_exclude_from_summary:
+                _write_row_to_sheet(exc_sheet, r)
         
         # Adjust column widths
         try:
@@ -702,7 +763,8 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         other_exc_sheet.append(display_headers)
         
         for r in other_exceptions_rows:
-            _write_row_to_sheet(other_exc_sheet, r)
+            if id(r) not in rows_to_exclude_from_summary:
+                _write_row_to_sheet(other_exc_sheet, r)
         
         # Adjust column widths
         try:
@@ -714,57 +776,21 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
                 other_exc_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
         except Exception:
             pass
-
-    # NOUVELLE FONCTIONNALITÉ: Détection des doublons potentiels (910 vs 202)
-    # Combiner toutes les rows pour la détection
-    all_rows_for_duplicates = list(rows) + (beaccmcx091_rows or []) + (exception_323201_rows or []) + (other_exceptions_rows or [])
     
-    # Créer des groupes par (référence, montant) pour détecter les doublons
-    potential_duplicates = []
-    seen_keys = {}
-    
-    for r in all_rows_for_duplicates:
-        mt_type = r.get("type_MT") or ""
-        montant = r.get("montant")
-        
-        # Pour les MT910, utiliser F20 comme référence (déjà fait dans l'extraction)
-        reference = r.get("reference")
-        
-        if reference and montant is not None:
-            # Normaliser la clé
-            key = (str(reference).strip().upper(), float(montant) if montant else 0)
-            
-            if key in seen_keys:
-                # Doublon potentiel trouvé
-                prev_row = seen_keys[key]
-                prev_type = prev_row.get("type_MT") or ""
-                
-                # Un doublon est si c'est un 910 vs 202 (ou l'inverse)
-                is_910_vs_202 = (
-                    ("910" in mt_type and "202" in prev_type) or
-                    ("202" in mt_type and "910" in prev_type)
-                )
-                
-                if is_910_vs_202:
-                    # Ajouter les deux si pas déjà ajoutés
-                    if prev_row not in potential_duplicates:
-                        potential_duplicates.append(prev_row)
-                    if r not in potential_duplicates:
-                        potential_duplicates.append(r)
-            else:
-                seen_keys[key] = r
-    
-    # Créer la feuille Doublons_potentiels si nécessaire
+    # ÉTAPE 4: Créer la feuille Doublons_potentiels (contient TOUS les doublons détectés)
     if potential_duplicates:
         sheet_index = 1
         if beaccmcx091_rows:
             sheet_index += 1
         if exception_323201_rows:
             sheet_index += 1
+        if other_exceptions_rows:
+            sheet_index += 1
         
         dup_sheet = wb.create_sheet(title="Doublons_potentiels", index=sheet_index)
         dup_sheet.append(display_headers)
         
+        # Écrire TOUS les doublons (pas de filtrage ici)
         for r in potential_duplicates:
             _write_row_to_sheet(dup_sheet, r)
         
@@ -782,11 +808,13 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     # Add per-country summary sheets (after special sheets, before per-file sheets)
     countries = {}
     for r in rows:
-        country = r.get("pays_iso3")
-        if country:
-            if country not in countries:
-                countries[country] = []
-            countries[country].append(r)
+        # Exclure les doublons aussi des feuilles par pays
+        if id(r) not in rows_to_exclude_from_summary:
+            country = r.get("pays_iso3")
+            if country:
+                if country not in countries:
+                    countries[country] = []
+                countries[country].append(r)
     
     # Create a sheet for each country with summary data
     for country_code in sorted(countries.keys()):
@@ -861,6 +889,143 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     return out_path
 
 
+def extract_mt900_only(pdf_path: Path, bic_xlsx: Optional[str] = None) -> tuple[List[Dict], Dict[str, set]]:
+    """
+    Extraire uniquement les MT900 d'un fichier PDF.
+    
+    Args:
+        pdf_path: Chemin vers le fichier PDF
+        bic_xlsx: Chemin optionnel vers le fichier Excel BIC
+        
+    Returns:
+        tuple: (mt900_rows, missing_codes)
+    """
+    p = Path(pdf_path)
+    
+    if HAS_MT_MULTI and mt_multi_module:
+        try:
+            return mt_multi_module.extract_mt900_only(p, bic_xlsx=bic_xlsx)
+        except Exception as e:
+            logger.exception("extract_mt900_only: failed for %s: %s", p.name, e)
+    
+    return [], {"unmapped": set(), "empty": set()}
+
+
+def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]) -> tuple[List[Dict], List[Dict], List[Dict]]:
+    """
+    Matcher les MT900 avec les MT103/MT202 via la référence d'origine (F21).
+    Applique également les règles d'exception pour MT900.
+    
+    Logique:
+    - Vérifier d'abord si le MT900 doit être en exception (T2PL, NIVLT)
+    - Pour chaque MT900, chercher le MT103/MT202 dont F20 (référence) = F21 du MT900 (related_reference)
+    - Compléter les infos du MT900 (donneur d'ordre, pays) depuis le MT103/MT202 matché
+    - Les MT103/MT202 sans correspondance vont dans suspens
+    
+    Args:
+        mt900_rows: Liste des MT900 extraits
+        transfer_rows: Liste des MT103/MT202 extraits
+        
+    Returns:
+        tuple: (matched_mt900_rows, suspens_rows, exception_mt900_rows)
+    """
+    # Fonction pour vérifier les exceptions MT900
+    def _check_mt900_exception(row: Dict) -> Optional[str]:
+        """
+        Vérifier si le MT900 doit être mis en exception.
+        """
+        if not row or not row.get("type_MT"):
+            return None
+        
+        if not row.get("type_MT").startswith("fin.900"):
+            return None
+        
+        # Vérifier F20 (référence)
+        reference = row.get("reference") or ""
+        reference_upper = reference.upper()
+        
+        if "T2PL" in reference_upper:
+            return "T2PL"
+        
+        # Vérifier F21 (référence d'origine)
+        related_reference = row.get("related_reference") or ""
+        related_ref_upper = related_reference.upper()
+        
+        if "NIVLT" in related_ref_upper or "NIVELLEMENT" in related_ref_upper:
+            return "nivellement"
+        
+        return None
+    
+    # Créer un index des MT103/MT202 par référence pour le matching rapide
+    ref_index: Dict[str, Dict] = {}
+    for row in transfer_rows:
+        ref = row.get("reference")
+        if ref:
+            ref_key = str(ref).strip().upper()
+            ref_index[ref_key] = row
+    
+    # Matcher les MT900 avec les MT103/MT202
+    matched_mt900_rows: List[Dict] = []
+    exception_mt900_rows: List[Dict] = []
+    matched_refs: set = set()
+    
+    for mt900_row in mt900_rows:
+        # Vérifier d'abord si le MT900 doit être mis en exception
+        exception_comment = _check_mt900_exception(mt900_row)
+        if exception_comment:
+            mt900_row["commentaires"] = exception_comment
+            exception_mt900_rows.append(mt900_row)
+            continue  # Ne pas matcher ce message, il va directement en exception
+        
+        # La référence d'origine F21 est utilisée pour matcher
+        related_ref = mt900_row.get("related_reference")
+        
+        if related_ref:
+            ref_key = str(related_ref).strip().upper()
+            
+            if ref_key in ref_index:
+                # Match trouvé ! Compléter les infos du MT900 avec celles du MT103/MT202
+                matched_transfer = ref_index[ref_key]
+                
+                # Copier les infos manquantes du MT103/MT202 vers le MT900
+                fields_to_copy = [
+                    "code_donneur_dordre", "donneur_dordre", "beneficiaire", 
+                    "pays_iso3", "correspondant"
+                ]
+                for field in fields_to_copy:
+                    if not mt900_row.get(field) and matched_transfer.get(field):
+                        mt900_row[field] = matched_transfer[field]
+                
+                # Ajouter info de matching
+                mt900_row["matched_with"] = matched_transfer.get("reference")
+                mt900_row["matched_type"] = matched_transfer.get("type_MT")
+                # Ajouter la source du message matché pour la traçabilité
+                mt900_row["matched_source"] = matched_transfer.get("source_pdf")
+                
+                matched_refs.add(ref_key)
+        
+        matched_mt900_rows.append(mt900_row)
+    
+    # Les MT103/MT202 non matchés vont dans suspens
+    suspens_rows: List[Dict] = []
+    for row in transfer_rows:
+        ref = row.get("reference")
+        if ref:
+            ref_key = str(ref).strip().upper()
+            if ref_key not in matched_refs:
+                row["status"] = "suspens - pas de confirmation MT900"
+                suspens_rows.append(row)
+        else:
+            # Pas de référence = suspens
+            row["status"] = "suspens - référence manquante"
+            suspens_rows.append(row)
+    
+    logger.info("match_mt900_with_transfers: %d matched, %d suspens, %d exceptions", 
+                len(matched_mt900_rows), len(suspens_rows), len(exception_mt900_rows))
+    
+    return matched_mt900_rows, suspens_rows, exception_mt900_rows
+
+
 def extract_transfer_analysis_dispatch(pdf_path: Path) -> tuple[List[Dict], List[Dict], Dict[str, set]]:
     """
     Dispatch pour l'analyse des transferts sortants exécutés.
@@ -881,17 +1046,19 @@ def extract_transfer_analysis_dispatch(pdf_path: Path) -> tuple[List[Dict], List
     return [], [], {"unmapped": set(), "empty": set()}
 
 
-def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: List[Dict], out_dir: Path, date_start: str = None, date_end: str = None) -> Path:
+def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: List[Dict], exception_rows: List[Dict], out_dir: Path, date_start: str = None, date_end: str = None) -> Path:
     """
     Créer un workbook Excel pour l'analyse des transferts sortants exécutés.
     
     Sheets:
     - "Transferts_Executes": MT900 matchés avec leurs infos complétées
     - "Suspens": MT202/MT103 sans confirmation MT900
+    - "Exceptions": MT900 en exception (T2PL, nivellement)
     
     Args:
         matched_rows: Liste des MT900 matchés
         suspens_rows: Liste des MT202/MT103 sans correspondant
+        exception_rows: Liste des MT900 en exception
         out_dir: Répertoire de sortie
         date_start: Date de début optionnelle
         date_end: Date de fin optionnelle
@@ -925,8 +1092,7 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
         "Bénéficiaire",
         "pays_iso3",
         "correspondant",
-        "matched_with",
-        "matched_type",
+        "Message correspondant",
         "source_pdf"
     ]
     
@@ -962,6 +1128,17 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
     
     for r in matched_rows:
         date_ref = _convert_date_to_excel(r.get("date_reference"))
+        
+        # Construire le texte "Message correspondant" à partir des infos de matching
+        # Format: "voir message N°X du fichier Y.pdf" si la source est au format attendu
+        matched_source = r.get("matched_source") or ""
+        matched_type = r.get("matched_type") or ""
+        if matched_source:
+            # La source est déjà au format "voir message N°X du fichier Y.pdf" ou juste "Y.pdf"
+            message_correspondant = f"{matched_type} - {matched_source}" if matched_type else matched_source
+        else:
+            message_correspondant = None
+        
         row_data = [
             r.get("type_MT"),
             r.get("reference"),
@@ -974,8 +1151,7 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
             r.get("beneficiaire"),
             r.get("pays_iso3"),
             r.get("correspondant"),
-            r.get("matched_with"),
-            r.get("matched_type"),
+            message_correspondant,
             r.get("source_pdf")
         ]
         exec_sheet.append(row_data)
@@ -1033,7 +1209,63 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
         except Exception:
             pass
     
+    # Sheet 3: Exceptions (MT900 en exception)
+    if exception_rows:
+        exception_sheet = wb.create_sheet(title="Exceptions")
+        
+        # Headers pour les exceptions
+        exception_headers = [
+            "type_MT",
+            "reference",
+            "related_reference",
+            "date_reference",
+            "devise",
+            "montant",
+            "Code du donneur d'ordre",
+            "donneur d'ordre",
+            "Bénéficiaire",
+            "pays_iso3",
+            "correspondant",
+            "Commentaires",
+            "source_pdf"
+        ]
+        exception_sheet.append(exception_headers)
+        
+        for r in exception_rows:
+            date_ref = _convert_date_to_excel(r.get("date_reference"))
+            row_data = [
+                r.get("type_MT"),
+                r.get("reference"),
+                r.get("related_reference"),
+                date_ref,
+                r.get("devise"),
+                r.get("montant"),
+                r.get("code_donneur_dordre"),
+                r.get("donneur_dordre"),
+                r.get("beneficiaire"),
+                r.get("pays_iso3"),
+                r.get("correspondant"),
+                r.get("commentaires"),
+                r.get("source_pdf")
+            ]
+            exception_sheet.append(row_data)
+            
+            if date_ref and isinstance(date_ref, datetime):
+                current_row = exception_sheet.max_row
+                exception_sheet.cell(row=current_row, column=4).number_format = 'DD/MM/YYYY'
+        
+        # Ajuster largeurs de colonnes
+        try:
+            for col_idx in range(1, len(exception_headers) + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in exception_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10
+                )
+                exception_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+    
     wb.save(out_path)
-    logger.info("Transfer analysis workbook created: %s (matched: %d, suspens: %d)", 
-                out_path, len(matched_rows), len(suspens_rows))
+    logger.info("Transfer analysis workbook created: %s (matched: %d, suspens: %d, exceptions: %d)", 
+                out_path, len(matched_rows), len(suspens_rows), len(exception_rows))
     return out_path

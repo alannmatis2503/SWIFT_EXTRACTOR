@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 import pdfplumber
 
-from backend.app.extractors.mt202 import (
+from extractors.mt202 import (
     get_field_block,
     parse_amount,
     parse_date_YYMMDD,
@@ -17,7 +17,7 @@ from backend.app.extractors.mt202 import (
     extract_receiver_bic,
     parse_reference as parse_reference_mt202,
 )
-from backend.app.extractors.bic_utils import get_donneur_from_f52  # NEW
+from extractors.bic_utils import get_donneur_from_f52  # NEW
 
 # Pre-compiled patterns for performance
 _INVALID_DONNEUR_WORDS_MT103 = frozenset(['IDENTIFIANT', 'INSTITUTION', 'IDENTIFIER', 'CODE', 'PARTY'])
@@ -158,7 +158,8 @@ def extract_donneur_from_f50(text: str) -> tuple[Optional[str], Optional[str]]:
         'CG',  # Congo
         'GA',  # Gabon
         'GQ',  # Guinée Équatoriale
-        'TD'   # Tchad
+        'TD',   # Tchad
+        'FR'   # France (pour les banques françaises opérant en CEMAC)
     }
     
     # Mots français/anglais courants à exclure (faux positifs potentiels)

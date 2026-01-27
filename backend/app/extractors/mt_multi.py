@@ -34,12 +34,13 @@ except Exception:
 # optional bic mapping utilities (used only for 202/103 postprocessing)
 try:
     from backend.app.extractors import bic_utils
-    from backend.app.extractors.bic_utils import map_reglement_code, extract_4digit_code_from_f52d, extract_ccf_4digit_code_from_f50f
+    from backend.app.extractors.bic_utils import map_reglement_code, extract_4digit_code_from_f52d, extract_tresor_code_from_f50f, extract_ccf_4digit_code_from_f50f
     HAS_BIC_UTILS = True
 except Exception:
     bic_utils = None
     map_reglement_code = None
     extract_4digit_code_from_f52d = None
+    extract_tresor_code_from_f50f = None
     extract_ccf_4digit_code_from_f50f = None
     HAS_BIC_UTILS = False
 
@@ -80,15 +81,40 @@ except Exception:
         return m.group(2).strip() if m else None
 
 
+# Try to import PyMuPDF for faster PDF extraction (~50x faster than pdfplumber)
+try:
+    import fitz as pymupdf
+    HAS_PYMUPDF = True
+except ImportError:
+    HAS_PYMUPDF = False
+
+
 def _safe_text_extract(pdf_path: Path) -> str:
     """
-    Extract text reliably from pdf using pdfplumber and normalize newlines.
+    Extract text reliably from pdf using PyMuPDF (fast) or pdfplumber (fallback).
     Keep some whitespace structure (double newlines) but remove excessive blank runs.
+    
+    Performance: PyMuPDF is ~50x faster than pdfplumber for text extraction.
     """
     text = ""
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        for p in pdf.pages:
-            text += "\n" + (p.extract_text() or "")
+    
+    # Try PyMuPDF first (much faster)
+    if HAS_PYMUPDF:
+        try:
+            doc = pymupdf.open(str(pdf_path))
+            for page in doc:
+                text += "\n" + page.get_text()
+            doc.close()
+        except Exception as e:
+            logger.debug("PyMuPDF extraction failed, falling back to pdfplumber: %s", e)
+            text = ""
+    
+    # Fallback to pdfplumber if PyMuPDF failed or not available
+    if not text:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for p in pdf.pages:
+                text += "\n" + (p.extract_text() or "")
+    
     # normalize
     text = text.replace('\r', '\n')
     # remove "page X of Y" lines often injected
@@ -483,26 +509,34 @@ def _fill_country_from_code_force(row: Dict, xlsx_path: Optional[str] = None) ->
 
 def _extract_f58a_beneficiary(row: Dict, block_text: str, xlsx_path: Optional[str] = None) -> Dict:
     """
-    For MT202 outgoing: extract F58A (Beneficiary Institution) to populate beneficiaire.
-    Extract BIC code from F58A and match against bic_codes.xlsx to get name.
-    If name not found, use code and track as unmapped.
+    For MT202 outgoing: extract F58A or F58D (Beneficiary Institution) to populate beneficiaire.
+    
+    Priority:
+    1. F58A: Extract BIC code and match against bic_codes.xlsx to get name
+    2. F58D (fallback): Extract BIC code, or if no BIC found, extract name from NameAndAddress
     
     Returns:
         Updated row with beneficiaire field populated
     """
     try:
-        f58_block = get_field_block(block_text, 'F58A')
+        f58a_block = get_field_block(block_text, 'F58A')
     except Exception:
-        f58_block = None
+        f58a_block = None
+    
+    try:
+        f58d_block = get_field_block(block_text, 'F58D')
+    except Exception:
+        f58d_block = None
 
     code_name = None
     code_only = None
 
-    if HAS_BIC_UTILS and f58_block:
+    # --- Étape 1: Essayer F58A (prioritaire) ---
+    if HAS_BIC_UTILS and f58a_block:
         try:
             # Try to extract code from F58A using similar logic as F52A
             # Look for BIC pattern in F58A
-            m_bic = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f58_block)
+            m_bic = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f58a_block)
             if m_bic:
                 code_only = m_bic.group(1).upper()
                 try:
@@ -518,12 +552,89 @@ def _extract_f58a_beneficiary(row: Dict, block_text: str, xlsx_path: Optional[st
             logger.debug("mt_multi: F58A extraction error: %s", e)
             code_name = None
 
-    if not code_name and f58_block:
+    if not code_name and f58a_block:
         # Fallback: search for any BIC-like pattern in F58A block
-        m_bic = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f58_block)
+        m_bic = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f58a_block)
         if m_bic:
             code_only = m_bic.group(1).upper()
             code_name = code_only
+
+    # --- Étape 2: Si rien trouvé dans F58A, essayer F58D ---
+    if not code_name and f58d_block:
+        logger.debug("mt_multi: F58A empty or no BIC found, trying F58D")
+        
+        # Séparer le bloc en deux parties: avant et après NameAndAddress
+        # Le BIC doit être cherché AVANT NameAndAddress pour éviter les faux positifs
+        parts = re.split(r'NameAndAddress:', f58d_block, maxsplit=1)
+        before_nameaddr = parts[0] if parts else f58d_block
+        after_nameaddr = parts[1] if len(parts) > 1 else ""
+        
+        # D'abord chercher un code BIC AVANT la section NameAndAddress
+        m_bic = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', before_nameaddr)
+        if m_bic:
+            potential_bic = m_bic.group(1).upper()
+            # Vérifier que ce n'est pas un faux positif
+            if potential_bic not in _FALSE_BIC_WORDS:
+                code_only = potential_bic
+                if HAS_BIC_UTILS:
+                    try:
+                        name = bic_utils.map_code_to_name(code_only, xlsx_path=xlsx_path)
+                        if name:
+                            code_name = f"{code_only}/{name}"
+                        else:
+                            code_name = code_only
+                    except Exception as e:
+                        logger.debug("mt_multi: map_code_to_name failed for F58D code %s: %s", code_only, e)
+                        code_name = code_only
+                else:
+                    code_name = code_only
+        
+        # Si pas de BIC avant NameAndAddress, chercher dans le NameAndAddress
+        if not code_name and after_nameaddr:
+            # Extraire le contenu après "Nom et adresse:"
+            m_name = re.search(r'Nom\s+et\s+adresse:\s*\n?\s*(.+)', after_nameaddr, re.DOTALL)
+            if m_name:
+                nameaddr_content = m_name.group(1).strip()
+                lines = nameaddr_content.split('\n')
+                
+                # Chercher d'abord un BIC dans les lignes du NameAndAddress
+                found_bic_in_nameaddr = False
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Chercher un pattern BIC (8-12 caractères: 4 lettres + 2 lettres + 2-6 alphanum)
+                    # Standard: 8 ou 11 chars, mais certains systèmes utilisent 12 (ex: CORITDNDXXXX)
+                    m_bic_line = re.search(r'^([A-Z]{4}[A-Z]{2}[A-Z0-9]{2,6})$', line)
+                    if m_bic_line:
+                        potential_bic = m_bic_line.group(1).upper()
+                        if potential_bic not in _FALSE_BIC_WORDS:
+                            code_only = potential_bic
+                            if HAS_BIC_UTILS:
+                                try:
+                                    name = bic_utils.map_code_to_name(code_only, xlsx_path=xlsx_path)
+                                    if name:
+                                        code_name = f"{code_only}/{name}"
+                                    else:
+                                        code_name = code_only
+                                except Exception:
+                                    code_name = code_only
+                            else:
+                                code_name = code_only
+                            found_bic_in_nameaddr = True
+                            break
+                
+                # Si pas de BIC trouvé, prendre le texte complet du NameAndAddress
+                if not found_bic_in_nameaddr:
+                    for line in lines:
+                        line = line.strip()
+                        # Ignorer les lignes qui ressemblent à des IBAN ou sont trop courtes
+                        if line and len(line) > 3 and not re.match(r'^[A-Z]{2}\d{2}', line) and not re.match(r'^\d+$', line):
+                            # Pour le nom, on peut prendre plusieurs lignes si c'est le nom d'une banque
+                            # Mais on s'arrête au premier retour à la ligne significatif
+                            code_name = line
+                            logger.debug("mt_multi: F58D NameAndAddress extracted: %s", code_name)
+                            break
 
     if code_name:
         # Set beneficiaire to name if available, otherwise code
@@ -548,6 +659,16 @@ except Exception:
 
 # Constants for invalid words check (set for O(1) lookup)
 _INVALID_DONNEUR_WORDS = frozenset(['IDENTIFIANT', 'INSTITUTION', 'IDENTIFIER', 'CODE', 'NAMEANDADDRESS', 'PARTY'])
+
+# Mots courants qui peuvent matcher le pattern BIC mais ne sont pas des BICs
+_FALSE_BIC_WORDS = frozenset([
+    'CAMEROON', 'CAMEROUN', 'GABON', 'CONGO', 'TCHAD', 'CENTRAFRICAINE', 
+    'GUINEE', 'EQUATORIALE', 'DOUALA', 'YAOUNDE', 'MALABO', 'LIBREVILLE',
+    'BRAZZAVILLE', 'BANGUI', 'NDJAMENA', 'INSTITUTION', 'IDENTIFIANT',
+    'IDENTIFIER', 'BENEFICIAIRE', 'DONNEUR', 'ORDRE', 'PARTIE',
+    'TRANSFER', 'PAYMENT', 'CREDIT', 'DEBIT', 'COMPTE', 'ACCOUNT',
+    'FINANCES', 'MINISTERE', 'TRESOR', 'BANQUE', 'FRANCE', 'AFRIQUE'
+])
 
 def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional[str] = None) -> Dict:
     """
@@ -594,21 +715,8 @@ def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional
     if not code_name and f52d_block:
         use_f52d = True
         
-        # D'abord chercher un code BIC dans F52D
-        bic_match = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f52d_block)
-        if bic_match:
-            bic_code = bic_match.group(1).upper()
-            if HAS_BIC_UTILS:
-                try:
-                    name = bic_utils.map_code_to_name(bic_code, xlsx_path=xlsx_path)
-                    code_name = f"{bic_code}/{name}" if name else bic_code
-                except Exception:
-                    code_name = bic_code
-            else:
-                code_name = bic_code
-        
-        # Si pas de BIC, chercher un code 4 chiffres
-        if not code_name and HAS_BIC_UTILS and extract_4digit_code_from_f52d:
+        # D'ABORD chercher un code 4 chiffres (après "PartyIdentifier: Identifiant de partie:")
+        if HAS_BIC_UTILS and extract_4digit_code_from_f52d:
             code_4 = extract_4digit_code_from_f52d(f52d_block)
             if code_4:
                 # Mapper avec la colonne Reglement
@@ -621,6 +729,22 @@ def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional
                 else:
                     # Code 4 chiffres trouvé mais pas de mapping
                     code_name = code_4
+        
+        # Si pas de code 4 chiffres, chercher un code BIC dans F52D
+        if not code_name:
+            bic_match = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f52d_block)
+            if bic_match:
+                bic_code = bic_match.group(1).upper()
+                # Vérifier que ce n'est pas un faux positif (mot courant qui ressemble à un BIC)
+                if bic_code not in _FALSE_BIC_WORDS:
+                    if HAS_BIC_UTILS:
+                        try:
+                            name = bic_utils.map_code_to_name(bic_code, xlsx_path=xlsx_path)
+                            code_name = f"{bic_code}/{name}" if name else bic_code
+                        except Exception:
+                            code_name = bic_code
+                    else:
+                        code_name = bic_code
         
         # Fallback: extraire le nom de F52D si disponible
         if not code_name and HAS_NAME_EXTRACTORS:
@@ -724,11 +848,12 @@ def _extract_f52a_for_mt910(row: Dict, block_text: str, xlsx_path: Optional[str]
     return row
 
 
-def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, direction: str = "incoming") -> tuple[List[Dict], List[Dict], List[Dict], List[Dict], Dict[str, set]]:
+def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, direction: str = "incoming", preloaded_text: Optional[str] = None) -> tuple[List[Dict], List[Dict], List[Dict], List[Dict], Dict[str, set]]:
     """
     Main entrypoint: read pdf_path, split into messages, dispatch to extractors.
     bic_xlsx: optional path forwarded to bic_utils when used in postprocessing.
     direction: "incoming" or "outgoing" - determines beneficiary extraction logic
+    preloaded_text: optional pre-extracted text to avoid re-reading the PDF (optimization)
     
     Returns:
         tuple: (list of extracted rows, list of BEACCMCX091 rows, list of 323201 exception rows, 
@@ -745,7 +870,8 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
         except Exception as e:
             logger.debug("mt_multi: bic mapping preload failed: %s", e)
 
-    text = _safe_text_extract(pdf_path)
+    # Use preloaded text if available, otherwise extract from PDF
+    text = preloaded_text if preloaded_text else _safe_text_extract(pdf_path)
     blocks = _split_messages(text)
     multi = len(blocks) > 1
     rows: List[Dict] = []
@@ -758,7 +884,8 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
     }
     
     # RÈGLE 1: Types valides à accepter
-    VALID_BASE_TYPES = {'202', '103', '910', '900'}
+    # MT900 exclus des modes incoming/outgoing - inclus uniquement en mode transfer_analysis
+    VALID_BASE_TYPES = {'202', '103', '910'}
 
     for i, blk in enumerate(blocks, start=1):
         # Format: "voir message N°X du fichier filename.pdf" (multi) or just "filename.pdf" (single)
@@ -842,38 +969,50 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                                 row["code_donneur_dordre"] = None
                     else:
                         # Sortants: Nouvelle logique avec priorités
-                        # Priorité 1: Codes Trésor (1001-6001) dans F50F - non applicable au backend
-                        # Priorité 2: Code BIC depuis F52A
-                        code_bic, nom_donneur = extract_donneur_outgoing_mt103(blk)
-                        if code_bic:
-                            row["code_donneur_dordre"] = code_bic
-                            if HAS_BIC_UTILS:
-                                name = bic_utils.map_code_to_name(code_bic, xlsx_path=bic_xlsx)
-                                row["donneur_dordre"] = name if name else nom_donneur
-                            else:
-                                row["donneur_dordre"] = nom_donneur
+                        # Priorité 1: Codes Trésor (1001-6001) dans F50F
+                        f50f_block = get_field_block(blk, 'F50F')
+                        tresor_info = None
+                        
+                        if f50f_block and HAS_BIC_UTILS and extract_tresor_code_from_f50f:
+                            tresor_info = extract_tresor_code_from_f50f(f50f_block, xlsx_path=bic_xlsx)
+                        
+                        if tresor_info:
+                            # Code Trésor trouvé
+                            row["code_donneur_dordre"] = tresor_info["code"]
+                            row["donneur_dordre"] = tresor_info["name"]
+                            if tresor_info.get("country") and not row.get("pays_iso3"):
+                                row["pays_iso3"] = tresor_info["country"]
                         else:
-                            # Priorité 3: Codes CCF 4 chiffres dans F50F
-                            f50f_block = get_field_block(blk, 'F50F')
-                            ccf_info = None
-                            if f50f_block and HAS_BIC_UTILS and extract_ccf_4digit_code_from_f50f:
-                                ccf_info = extract_ccf_4digit_code_from_f50f(f50f_block, xlsx_path=bic_xlsx)
-                            
-                            if ccf_info:
-                                # Code CCF trouvé
-                                row["code_donneur_dordre"] = ccf_info["code"]
-                                row["donneur_dordre"] = ccf_info["name"]
-                                if ccf_info.get("country") and not row.get("pays_iso3"):
-                                    row["pays_iso3"] = ccf_info["country"]
-                            elif nom_donneur:
-                                # Priorité 4: Fallback vers le nom extrait de F50F
-                                row["donneur_dordre"] = nom_donneur
-                                row["code_donneur_dordre"] = None
+                            # Priorité 2: Code BIC depuis F52A
+                            code_bic, nom_donneur = extract_donneur_outgoing_mt103(blk)
+                            if code_bic:
+                                row["code_donneur_dordre"] = code_bic
+                                if HAS_BIC_UTILS:
+                                    name = bic_utils.map_code_to_name(code_bic, xlsx_path=bic_xlsx)
+                                    row["donneur_dordre"] = name if name else nom_donneur
+                                else:
+                                    row["donneur_dordre"] = nom_donneur
+                            else:
+                                # Priorité 3: Codes CCF 4 chiffres dans F50F
+                                ccf_info = None
+                                if f50f_block and HAS_BIC_UTILS and extract_ccf_4digit_code_from_f50f:
+                                    ccf_info = extract_ccf_4digit_code_from_f50f(f50f_block, xlsx_path=bic_xlsx)
+                                
+                                if ccf_info:
+                                    # Code CCF trouvé
+                                    row["code_donneur_dordre"] = ccf_info["code"]
+                                    row["donneur_dordre"] = ccf_info["name"]
+                                    if ccf_info.get("country") and not row.get("pays_iso3"):
+                                        row["pays_iso3"] = ccf_info["country"]
+                                elif nom_donneur:
+                                    # Priorité 4: Fallback vers le nom extrait de F50F
+                                    row["donneur_dordre"] = nom_donneur
+                                    row["code_donneur_dordre"] = None
                 else:
                     # Fallback: utiliser l'ancienne logique
                     row = _postprocess_row_for_202_103(row, blk, xlsx_path=bic_xlsx)
                 
-                # Pour MT103 sortants: bénéficiaire vide
+                # Pour MT103 sortants: bénéficiaire peut être laissé vide
                 if direction == "outgoing":
                     row["beneficiaire"] = None
             elif mt_type_token == '910':
@@ -939,6 +1078,7 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
         # RÈGLE 2: Pour MT910, séparer les BEACCMCX091 (ne plus les rejeter, les stocker séparément)
         is_beaccmcx091 = False
         if row.get("type_MT") and row.get("type_MT").startswith("fin.910"):
+            # Chercher d'abord dans F50A
             f50a_block = get_field_block(blk, 'F50A')
             if f50a_block:
                 # Chercher le code d'identifiant dans F50A après la ligne "IdentifierCode: Code d'identifiant:"
@@ -946,8 +1086,20 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                 if m:
                     code = m.group(1).strip().upper()
                     if code == "BEACCMCX091":
-                        logger.debug("mt_multi: Message %s identifié comme BEACCMCX091 (stocké séparément)", source_label)
+                        logger.debug("mt_multi: Message %s identifié comme BEACCMCX091 dans F50A (stocké séparément)", source_label)
                         is_beaccmcx091 = True
+            
+            # Chercher également dans F52A
+            if not is_beaccmcx091:
+                f52a_block = get_field_block(blk, 'F52A')
+                if f52a_block:
+                    # Chercher le code d'identifiant dans F52A
+                    m = re.search(r'(?i)IdentifierCode.*?Code d[\'`]identifiant:?\s+([A-Z0-9]{8,11})', f52a_block, re.DOTALL)
+                    if m:
+                        code = m.group(1).strip().upper()
+                        if code == "BEACCMCX091":
+                            logger.debug("mt_multi: Message %s identifié comme BEACCMCX091 dans F52A (stocké séparément)", source_label)
+                            is_beaccmcx091 = True
             
             # MT910: Extract F52A for beneficiary/donneur_dordre (même pour BEACCMCX091)
             row = _extract_f52a_for_mt910(row, blk, xlsx_path=bic_xlsx)
@@ -1167,6 +1319,8 @@ def extract_transfer_analysis(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
                 # Ajouter info de matching
                 mt900_row["matched_with"] = matched_202_103.get("reference")
                 mt900_row["matched_type"] = matched_202_103.get("type_MT")
+                # Ajouter la source du message matché pour la traçabilité
+                mt900_row["matched_source"] = matched_202_103.get("source_pdf")
                 
                 matched_refs.add(ref_key)
         
@@ -1199,6 +1353,61 @@ def extract_transfer_analysis(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
                 len(mt900_rows), len(matched_900_rows), len(suspens_rows), len(exception_900_rows))
     
     return matched_900_rows, suspens_rows, exception_900_rows, missing_codes
+
+
+def extract_mt900_only(pdf_path: Path, bic_xlsx: Optional[str] = None) -> tuple[List[Dict], Dict[str, set]]:
+    """
+    Extraire uniquement les MT900 d'un fichier PDF.
+    
+    Args:
+        pdf_path: Path to PDF file
+        bic_xlsx: Optional path to BIC codes Excel
+        
+    Returns:
+        tuple: (mt900_rows, missing_codes)
+    """
+    pdf_path = Path(pdf_path)
+    if not pdf_path.exists():
+        raise FileNotFoundError(pdf_path)
+    
+    # Preload BIC mapping if available
+    if HAS_BIC_UTILS:
+        try:
+            bic_utils.load_bic_mapping(bic_xlsx)
+        except Exception as e:
+            logger.debug("mt_multi: bic mapping preload failed: %s", e)
+    
+    text = _safe_text_extract(pdf_path)
+    blocks = _split_messages(text)
+    multi = len(blocks) > 1
+    
+    mt900_rows: List[Dict] = []
+    missing_codes: Dict[str, set] = {"unmapped": set(), "empty": set()}
+    
+    for i, blk in enumerate(blocks, start=1):
+        if multi:
+            source_label = f"voir message N°{i} du fichier {pdf_path.name}"
+        else:
+            source_label = pdf_path.name
+        
+        mt_type_token = _detect_mt_type(blk)
+        
+        if not mt_type_token:
+            continue
+        
+        # Extraire uniquement les MT900
+        if mt_type_token == '900' and HAS_MT900:
+            try:
+                row = mt900.extract_block(blk, source=source_label)
+                row["source_pdf"] = source_label
+                mt900_rows.append(row)
+            except Exception as e:
+                logger.exception("mt_multi: MT900 extraction failed for %s: %s", source_label, e)
+                continue
+    
+    logger.info("extract_mt900_only: %d MT900 extraits de %s", len(mt900_rows), pdf_path.name)
+    
+    return mt900_rows, missing_codes
 
 
 # quick CLI for manual test
