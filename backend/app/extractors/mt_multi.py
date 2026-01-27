@@ -34,12 +34,13 @@ except Exception:
 # optional bic mapping utilities (used only for 202/103 postprocessing)
 try:
     from backend.app.extractors import bic_utils
-    from backend.app.extractors.bic_utils import map_reglement_code, extract_4digit_code_from_f52d
+    from backend.app.extractors.bic_utils import map_reglement_code, extract_4digit_code_from_f52d, extract_ccf_4digit_code_from_f50f
     HAS_BIC_UTILS = True
 except Exception:
     bic_utils = None
     map_reglement_code = None
     extract_4digit_code_from_f52d = None
+    extract_ccf_4digit_code_from_f50f = None
     HAS_BIC_UTILS = False
 
 # Import MT103 specific functions
@@ -352,7 +353,7 @@ def _check_nivellement_exception(row: Dict, block_text: str, direction: str) -> 
 
 def _should_reject_mt103(row: Dict) -> bool:
     """
-    RÈGLE 3: Pour MT103, rejeter si F53A, F54A ou F57A contient:
+    RÈGLE 3: Pour MT103 en USD, rejeter si F53A, F54A ou F57A contient:
     - "BANQUE DE FRANCE"
     - "FW021083459"
     """
@@ -361,6 +362,11 @@ def _should_reject_mt103(row: Dict) -> bool:
     
     if not row.get("type_MT").startswith("fin.103"):
         return False
+    
+    # Vérifier que la devise est USD
+    devise = row.get("devise")
+    if not devise or devise.upper() != "USD":
+        return False  # Ne rejeter que les messages en USD
     
     forbidden_patterns = ["BANQUE DE FRANCE", "FW021083459"]
     fields_to_check = ["f53a_raw", "f54a_raw", "f57a_raw"]
@@ -371,10 +377,42 @@ def _should_reject_mt103(row: Dict) -> bool:
             field_upper = field_value.upper()
             for pattern in forbidden_patterns:
                 if pattern.upper() in field_upper:
-                    logger.debug("mt_multi: MT103 rejeté - Pattern '%s' trouvé dans %s", pattern, field_name)
+                    logger.debug("mt_multi: MT103 USD rejeté - Pattern '%s' trouvé dans %s", pattern, field_name)
                     return True  # Rejeter ce message
     
     return False  # Ne pas rejeter
+
+
+def _check_mt900_exception(row: Dict) -> Optional[str]:
+    """
+    RÈGLE: Pour MT900, mettre en exception si:
+    - "T2PL" dans F20 (référence) -> exception "T2PL"
+    - "NIVLT" ou "NIVELLEMENT" dans F21 (référence d'origine) -> exception "nivellement"
+    
+    Returns:
+        Le commentaire d'exception ou None si pas d'exception
+    """
+    if not row or not row.get("type_MT"):
+        return None
+    
+    if not row.get("type_MT").startswith("fin.900"):
+        return None
+    
+    # Vérifier F20 (référence)
+    reference = row.get("reference") or ""
+    reference_upper = reference.upper()
+    
+    if "T2PL" in reference_upper:
+        return "T2PL"
+    
+    # Vérifier F21 (référence d'origine)
+    related_reference = row.get("related_reference") or ""
+    related_ref_upper = related_reference.upper()
+    
+    if "NIVLT" in related_ref_upper or "NIVELLEMENT" in related_ref_upper:
+        return "nivellement"
+    
+    return None
 
 
 def _fill_country_from_code(row: Dict, xlsx_path: Optional[str] = None) -> Dict:
@@ -763,7 +801,9 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                             row["donneur_dordre"] = nom_donneur
                             row["code_donneur_dordre"] = None
                     else:
-                        # Sortants: F52A d'abord, sinon F50F
+                        # Sortants: Nouvelle logique avec priorités
+                        # Priorité 1: Codes Trésor (1001-6001) dans F50F - non applicable au backend
+                        # Priorité 2: Code BIC depuis F52A
                         code_bic, nom_donneur = extract_donneur_outgoing_mt103(blk)
                         if code_bic:
                             row["code_donneur_dordre"] = code_bic
@@ -772,9 +812,23 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                                 row["donneur_dordre"] = name if name else nom_donneur
                             else:
                                 row["donneur_dordre"] = nom_donneur
-                        elif nom_donneur:
-                            row["donneur_dordre"] = nom_donneur
-                            row["code_donneur_dordre"] = None
+                        else:
+                            # Priorité 3: Codes CCF 4 chiffres dans F50F
+                            f50f_block = get_field_block(blk, 'F50F')
+                            ccf_info = None
+                            if f50f_block and HAS_BIC_UTILS and extract_ccf_4digit_code_from_f50f:
+                                ccf_info = extract_ccf_4digit_code_from_f50f(f50f_block, xlsx_path=bic_xlsx)
+                            
+                            if ccf_info:
+                                # Code CCF trouvé
+                                row["code_donneur_dordre"] = ccf_info["code"]
+                                row["donneur_dordre"] = ccf_info["name"]
+                                if ccf_info.get("country") and not row.get("pays_iso3"):
+                                    row["pays_iso3"] = ccf_info["country"]
+                            elif nom_donneur:
+                                # Priorité 4: Fallback vers le nom extrait de F50F
+                                row["donneur_dordre"] = nom_donneur
+                                row["code_donneur_dordre"] = None
                 else:
                     # Fallback: utiliser l'ancienne logique
                     row = _postprocess_row_for_202_103(row, blk, xlsx_path=bic_xlsx)
@@ -1034,9 +1088,17 @@ def extract_transfer_analysis(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
     
     # Matcher les 900 avec les 202/103
     matched_900_rows: List[Dict] = []
+    exception_900_rows: List[Dict] = []
     matched_refs: set = set()
     
     for mt900_row in mt900_rows:
+        # Vérifier d'abord si le MT900 doit être mis en exception
+        exception_comment = _check_mt900_exception(mt900_row)
+        if exception_comment:
+            mt900_row["commentaires"] = exception_comment
+            exception_900_rows.append(mt900_row)
+            continue  # Ne pas matcher ce message, il va directement en exception
+        
         # La référence d'origine F21 est utilisée pour matcher
         related_ref = mt900_row.get("related_reference")
         
@@ -1085,7 +1147,7 @@ def extract_transfer_analysis(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
             suspens_rows.append(row)
     
     # Track missing codes
-    for row in matched_900_rows + suspens_rows:
+    for row in matched_900_rows + suspens_rows + exception_900_rows:
         code = row.get("code_donneur_dordre")
         name = row.get("donneur_dordre")
         if not code:
@@ -1093,10 +1155,10 @@ def extract_transfer_analysis(pdf_path: Path, bic_xlsx: Optional[str] = None) ->
         elif name == code:
             missing_codes["unmapped"].add(code)
     
-    logger.info("Transfer analysis: %d MT900, %d matched, %d suspens", 
-                len(mt900_rows), len(matched_900_rows), len(suspens_rows))
+    logger.info("Transfer analysis: %d MT900 total, %d matched, %d suspens, %d exceptions", 
+                len(mt900_rows), len(matched_900_rows), len(suspens_rows), len(exception_900_rows))
     
-    return matched_900_rows, suspens_rows, missing_codes
+    return matched_900_rows, suspens_rows, exception_900_rows, missing_codes
 
 
 # quick CLI for manual test

@@ -335,6 +335,65 @@ def extract_4digit_code_from_f52d(f52d_text: str) -> Optional[str]:
             return m.group(1)
     
     return None
+
+
+def extract_ccf_4digit_code_from_f50f(f50f_text: str, xlsx_path: Optional[str] = None) -> Optional[Dict[str, str]]:
+    """
+    Extract CCF 4-digit codes from F50F field by searching for codes found in the CCF column of bic_codes.xlsx.
+    The CCF format is like: 10.311301.0.1401.0.0.0.0.0
+    We extract the 4th part (1401, 1428, 1073, 9165, 1304, 6401) from all CCF entries,
+    then search for any of these 4-digit codes in the F50F text.
+    
+    Args:
+        f50f_text: The F50F block text
+        xlsx_path: Optional path to bic_codes.xlsx
+        
+    Returns:
+        Dict with keys 'code', 'name', 'country', 'bic' if found, None otherwise
+    """
+    if not f50f_text:
+        return None
+    
+    # Load the BIC mapping to populate the CCF map
+    _ = load_bic_mapping(xlsx_path=xlsx_path)
+    global _CCF_MAP
+    
+    if not _CCF_MAP:
+        return None
+    
+    # Extract all 4-digit codes from CCF entries (4th part of the CCF format)
+    ccf_4digit_codes = {}
+    for simplified_ccf, info in _CCF_MAP.items():
+        # simplified_ccf format: 10.311301.1401
+        parts = simplified_ccf.split('.')
+        if len(parts) >= 3:
+            code_4digit = parts[2]  # The 3rd part is the 4-digit code
+            if code_4digit and code_4digit.isdigit() and len(code_4digit) == 4:
+                ccf_4digit_codes[code_4digit] = {
+                    "ccf": simplified_ccf,
+                    "name": info["name"],
+                    "country": info["country"],
+                    "bic": info.get("bic", ""),
+                    "full_ccf": info.get("full_ccf", "")
+                }
+    
+    # Search for any of these 4-digit codes in F50F text
+    for code_4digit, info in ccf_4digit_codes.items():
+        # Pattern: the 4-digit code should be a standalone number or part of a longer sequence
+        # We search for it with word boundaries or within a longer numeric sequence
+        pattern = r'\b' + re.escape(code_4digit) + r'\b'
+        if re.search(pattern, f50f_text):
+            return {
+                "code": code_4digit,
+                "name": info["name"],
+                "country": info["country"],
+                "bic": info.get("bic", ""),
+                "ccf": info["ccf"]
+            }
+    
+    return None
+
+
 def map_code_to_country(code: str, xlsx_path: Optional[str] = None) -> Optional[str]:
     """
     Map a raw code (8..11 chars) to country ISO3 code using loaded mapping.
