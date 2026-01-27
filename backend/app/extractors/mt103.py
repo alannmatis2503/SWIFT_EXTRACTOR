@@ -150,6 +150,23 @@ def extract_donneur_from_f50(text: str) -> tuple[Optional[str], Optional[str]]:
     Returns:
         tuple: (code_bic, nom_donneur)
     """
+    # Codes pays CEMAC uniquement pour validation BIC
+    # CEMAC: Communauté Économique et Monétaire de l'Afrique Centrale
+    VALID_COUNTRY_CODES = {
+        'CM',  # Cameroun
+        'CF',  # République Centrafricaine
+        'CG',  # Congo
+        'GA',  # Gabon
+        'GQ',  # Guinée Équatoriale
+        'TD'   # Tchad
+    }
+    
+    # Mots français/anglais courants à exclure (faux positifs potentiels)
+    EXCLUDED_WORDS = {
+        'GENERALE', 'FINANCES', 'BANQUE', 'RECETTE', 'PAIERIE', 'TRESOR',
+        'MINISTERE', 'CAISSE', 'COMPTABLE', 'DETAILS', 'NATIONALE'
+    }
+    
     # Essayer F50K d'abord, puis F50F, puis F50
     f50_block = get_field_block(text, 'F50K') or get_field_block(text, 'F50F') or get_field_block(text, 'F50')
     
@@ -159,10 +176,16 @@ def extract_donneur_from_f50(text: str) -> tuple[Optional[str], Optional[str]]:
     code_bic = None
     nom_donneur = None
     
-    # Chercher un code BIC (8-11 caractères, lettres majuscules et chiffres)
-    bic_match = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f50_block)
-    if bic_match:
-        code_bic = bic_match.group(1).upper()
+    # Chercher un code BIC (8-11 caractères) avec validation du code pays
+    bic_candidates = re.findall(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', f50_block)
+    for candidate in bic_candidates:
+        # Valider que les positions 5-6 sont un code pays ISO valide
+        country_code = candidate[4:6]
+        if country_code in VALID_COUNTRY_CODES:
+            # Exclure les mots français/anglais courants
+            if candidate.upper() not in EXCLUDED_WORDS:
+                code_bic = candidate.upper()
+                break  # Prendre le premier BIC valide
     
     # Extraire le nom du donneur d'ordre
     lines = [l.strip() for l in f50_block.splitlines() if l.strip()]

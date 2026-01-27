@@ -202,40 +202,63 @@ def _detect_mt_type(block_text: str) -> Optional[str]:
 def _extract_f72_comment(block_text: str) -> Optional[str]:
     """
     Extraire le commentaire du champ F72 pour les 202 entrants.
-    Cherche exactement "Narrative: Texte descriptif:" et prend ce qui suit.
+    Prend TOUT le contenu du champ F72.
     """
     f72_block = get_field_block(block_text, 'F72')
     if not f72_block:
         return None
     
-    # Chercher exactement "Narrative: Texte descriptif:" et prendre ce qui suit
-    m = re.search(r'Narrative:\s*Texte descriptif:\s*([^\n]+)', f72_block)
-    if m:
-        comment = m.group(1).strip()
-        # Nettoyer les espaces multiples
-        comment = re.sub(r'\s+', ' ', comment).strip()
-        return comment if comment else None
-    return None
+    # Prendre tout le contenu du champ F72
+    comment = f72_block.strip()
+    # Nettoyer les espaces multiples et retours à la ligne
+    comment = re.sub(r'\s+', ' ', comment).strip()
+    return comment if comment else None
 
 
 def _extract_f70_comment(block_text: str) -> Optional[str]:
     """
     Extraire le commentaire du champ F70 pour les 103 entrants.
-    Ignorer "Informations sur le versement" et prendre le reste.
-    Le commentaire peut être sur plusieurs lignes.
-    Ignorer les "/"
+    Prend TOUT le contenu du champ F70.
     """
     f70_block = get_field_block(block_text, 'F70')
     if not f70_block:
         return None
     
-    # Supprimer "Informations sur le versement" (case insensitive)
-    cleaned = re.sub(r'(?i)Informations sur le versement\s*', '', f70_block)
-    # Ignorer les "/"
-    cleaned = cleaned.replace('/', ' ')
+    # Prendre tout le contenu du champ F70
+    comment = f70_block.strip()
     # Nettoyer les espaces multiples et retours à la ligne
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    return cleaned if cleaned else None
+    comment = re.sub(r'\s+', ' ', comment).strip()
+    return comment if comment else None
+
+
+def _extract_donneur_from_f50f_details(block_text: str) -> Optional[str]:
+    """
+    Extraire le nom du donneur d'ordre depuis F50F pour MT103 entrants.
+    Cherche dans le sous-champ "NameAndAddress: Numéro/Nom et adresse",
+    puis prend la ligne qui vient après "Number: Numéro: 1/Details: Détails:".
+    
+    Exemples:
+    - "AUDIBLE LIMITED"
+    - "PAIERIE GENERALE AUX ARMEES (PGA)"
+    """
+    f50f_block = get_field_block(block_text, 'F50F')
+    if not f50f_block:
+        return None
+    
+    # Chercher "Number: Numéro: 1/" puis "Details: Détails:" suivi du texte
+    # La structure peut être sur plusieurs lignes
+    # Pattern flexible pour capturer le texte après "Details: Détails:" jusqu'à la fin de ligne
+    pattern = r'Number:\s*Numéro:\s*1/\s*Details:\s*Détails:\s*(.+?)(?:\s*Number:\s*Numéro:\s*\d+/|$)'
+    m = re.search(pattern, f50f_block, re.IGNORECASE | re.DOTALL)
+    if m:
+        donneur = m.group(1).strip()
+        # Prendre seulement la première ligne (avant le premier retour à la ligne)
+        donneur = donneur.split('\n')[0].strip()
+        # Nettoyer les espaces multiples
+        donneur = re.sub(r'\s+', ' ', donneur).strip()
+        return donneur if donneur else None
+    
+    return None
 
 
 def _extract_sender_bic(block_text: str) -> Optional[str]:
@@ -788,18 +811,35 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                 # Traitement spécifique du donneur d'ordre pour MT103
                 if HAS_MT103_DONNEUR:
                     if direction == "incoming":
-                        # Entrants: F50K ou F50F
-                        code_bic, nom_donneur = extract_donneur_from_f50(blk)
+                        # Entrants: Priorités pour extraction du donneur d'ordre
+                        # Priorité 1: Code BIC depuis F50K ou F50F
+                        code_bic, nom_donneur_fallback = extract_donneur_from_f50(blk)
+                        
                         if code_bic:
+                            # Priorité 1: Code BIC trouvé
                             row["code_donneur_dordre"] = code_bic
                             if HAS_BIC_UTILS:
                                 name = bic_utils.map_code_to_name(code_bic, xlsx_path=bic_xlsx)
-                                row["donneur_dordre"] = name if name else nom_donneur
+                                row["donneur_dordre"] = name if name else nom_donneur_fallback
                             else:
-                                row["donneur_dordre"] = nom_donneur
-                        elif nom_donneur:
-                            row["donneur_dordre"] = nom_donneur
-                            row["code_donneur_dordre"] = None
+                                row["donneur_dordre"] = nom_donneur_fallback
+                        else:
+                            # Pas de code BIC, chercher alternatives
+                            # Priorité 2: Extraction depuis F50F "Number: Numéro: 1/Details: Détails:"
+                            donneur_f50f_details = _extract_donneur_from_f50f_details(blk)
+                            
+                            if donneur_f50f_details:
+                                # Priorité 2: Nom extrait depuis F50F details
+                                row["donneur_dordre"] = donneur_f50f_details
+                                row["code_donneur_dordre"] = None
+                            elif nom_donneur_fallback:
+                                # Priorité 3: Fallback vers le nom extrait par extract_donneur_from_f50
+                                row["donneur_dordre"] = nom_donneur_fallback
+                                row["code_donneur_dordre"] = None
+                            else:
+                                # Aucune donnée trouvée
+                                row["donneur_dordre"] = None
+                                row["code_donneur_dordre"] = None
                     else:
                         # Sortants: Nouvelle logique avec priorités
                         # Priorité 1: Codes Trésor (1001-6001) dans F50F - non applicable au backend
