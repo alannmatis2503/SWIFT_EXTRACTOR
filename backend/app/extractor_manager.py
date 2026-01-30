@@ -911,7 +911,7 @@ def extract_mt900_only(pdf_path: Path, bic_xlsx: Optional[str] = None) -> tuple[
     return [], {"unmapped": set(), "empty": set()}
 
 
-def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]) -> tuple[List[Dict], List[Dict], List[Dict]]:
+def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]) -> tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
     """
     Matcher les MT900 avec les MT103/MT202 via la référence d'origine (F21).
     Applique également les règles d'exception pour MT900.
@@ -921,13 +921,14 @@ def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]
     - Pour chaque MT900, chercher le MT103/MT202 dont F20 (référence) = F21 du MT900 (related_reference)
     - Compléter les infos du MT900 (donneur d'ordre, pays) depuis le MT103/MT202 matché
     - Les MT103/MT202 sans correspondance vont dans suspens
+    - Les MT900 sans correspondance vont dans unmatched_mt900_rows
     
     Args:
         mt900_rows: Liste des MT900 extraits
         transfer_rows: Liste des MT103/MT202 extraits
         
     Returns:
-        tuple: (matched_mt900_rows, suspens_rows, exception_mt900_rows)
+        tuple: (matched_mt900_rows, suspens_rows, exception_mt900_rows, unmatched_mt900_rows)
     """
     # Fonction pour vérifier les exceptions MT900
     def _check_mt900_exception(row: Dict) -> Optional[str]:
@@ -965,7 +966,8 @@ def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]
             ref_index[ref_key] = row
     
     # Matcher les MT900 avec les MT103/MT202
-    matched_mt900_rows: List[Dict] = []
+    matched_mt900_rows: List[Dict] = []  # MT900 avec correspondant trouvé
+    unmatched_mt900_rows: List[Dict] = []  # MT900 sans correspondant
     exception_mt900_rows: List[Dict] = []
     matched_refs: set = set()
     
@@ -980,6 +982,7 @@ def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]
         # La référence d'origine F21 est utilisée pour matcher
         related_ref = mt900_row.get("related_reference")
         
+        has_match = False
         if related_ref:
             ref_key = str(related_ref).strip().upper()
             
@@ -1003,8 +1006,14 @@ def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]
                 mt900_row["matched_source"] = matched_transfer.get("source_pdf")
                 
                 matched_refs.add(ref_key)
+                has_match = True
         
-        matched_mt900_rows.append(mt900_row)
+        if has_match:
+            matched_mt900_rows.append(mt900_row)
+        else:
+            # MT900 sans correspondant trouvé
+            mt900_row["commentaires"] = "pas de correspondant MT103/MT202"
+            unmatched_mt900_rows.append(mt900_row)
     
     # Les MT103/MT202 non matchés vont dans suspens
     suspens_rows: List[Dict] = []
@@ -1020,10 +1029,10 @@ def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]
             row["status"] = "suspens - référence manquante"
             suspens_rows.append(row)
     
-    logger.info("match_mt900_with_transfers: %d matched, %d suspens, %d exceptions", 
-                len(matched_mt900_rows), len(suspens_rows), len(exception_mt900_rows))
+    logger.info("match_mt900_with_transfers: %d matched, %d unmatched MT900, %d suspens, %d exceptions", 
+                len(matched_mt900_rows), len(unmatched_mt900_rows), len(suspens_rows), len(exception_mt900_rows))
     
-    return matched_mt900_rows, suspens_rows, exception_mt900_rows
+    return matched_mt900_rows, suspens_rows, exception_mt900_rows, unmatched_mt900_rows
 
 
 def extract_transfer_analysis_dispatch(pdf_path: Path) -> tuple[List[Dict], List[Dict], Dict[str, set]]:
@@ -1046,12 +1055,13 @@ def extract_transfer_analysis_dispatch(pdf_path: Path) -> tuple[List[Dict], List
     return [], [], {"unmapped": set(), "empty": set()}
 
 
-def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: List[Dict], exception_rows: List[Dict], out_dir: Path, date_start: str = None, date_end: str = None) -> Path:
+def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: List[Dict], exception_rows: List[Dict], out_dir: Path, date_start: str = None, date_end: str = None, unmatched_mt900_rows: List[Dict] = None) -> Path:
     """
     Créer un workbook Excel pour l'analyse des transferts sortants exécutés.
     
     Sheets:
     - "Transferts_Executes": MT900 matchés avec leurs infos complétées
+    - "MT900_non_matches": MT900 sans correspondant MT103/MT202
     - "Suspens": MT202/MT103 sans confirmation MT900
     - "Exceptions": MT900 en exception (T2PL, nivellement)
     
@@ -1062,7 +1072,10 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
         out_dir: Répertoire de sortie
         date_start: Date de début optionnelle
         date_end: Date de fin optionnelle
+        unmatched_mt900_rows: Liste des MT900 sans correspondant MT103/MT202
     """
+    if unmatched_mt900_rows is None:
+        unmatched_mt900_rows = []
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1171,7 +1184,53 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
     except Exception:
         pass
     
-    # Sheet 2: Suspens (MT202/MT103 sans correspondant)
+    # Sheet 2: MT900_non_matches (MT900 sans correspondant MT103/MT202)
+    if unmatched_mt900_rows:
+        unmatched_headers = [
+            "type_MT",
+            "reference",
+            "related_reference",
+            "date_reference",
+            "devise",
+            "montant",
+            "correspondant",
+            "Commentaires",
+            "source_pdf"
+        ]
+        unmatched_sheet = wb.create_sheet(title="MT900_non_matches")
+        unmatched_sheet.append(unmatched_headers)
+        
+        for r in unmatched_mt900_rows:
+            date_ref = _convert_date_to_excel(r.get("date_reference"))
+            row_data = [
+                r.get("type_MT"),
+                r.get("reference"),
+                r.get("related_reference"),
+                date_ref,
+                r.get("devise"),
+                r.get("montant"),
+                r.get("correspondant"),
+                r.get("commentaires"),
+                r.get("source_pdf")
+            ]
+            unmatched_sheet.append(row_data)
+            
+            if date_ref and isinstance(date_ref, datetime):
+                current_row = unmatched_sheet.max_row
+                unmatched_sheet.cell(row=current_row, column=4).number_format = 'DD/MM/YYYY'
+        
+        # Ajuster largeurs de colonnes
+        try:
+            for col_idx in range(1, len(unmatched_headers) + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in unmatched_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10
+                )
+                unmatched_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+    
+    # Sheet 3: Suspens (MT202/MT103 sans correspondant)
     if suspens_rows:
         suspens_sheet = wb.create_sheet(title="Suspens")
         suspens_sheet.append(suspens_headers)
@@ -1266,6 +1325,6 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
             pass
     
     wb.save(out_path)
-    logger.info("Transfer analysis workbook created: %s (matched: %d, suspens: %d, exceptions: %d)", 
-                out_path, len(matched_rows), len(suspens_rows), len(exception_rows))
+    logger.info("Transfer analysis workbook created: %s (matched: %d, unmatched_mt900: %d, suspens: %d, exceptions: %d)", 
+                out_path, len(matched_rows), len(unmatched_mt900_rows), len(suspens_rows), len(exception_rows))
     return out_path
