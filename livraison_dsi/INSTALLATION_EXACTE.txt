@@ -1,0 +1,199 @@
+================================================================================
+   COMMANDES EXACTES — COPIER-COLLER DANS POWERSHELL
+================================================================================
+
+   IMPORTANT : Ouvrir PowerShell (PAS l'invite de commandes CMD).
+   Clic droit sur le menu Démarrer → "Windows PowerShell"
+   ou rechercher "PowerShell" dans la barre de recherche.
+
+   Le symbole $ fait partie des commandes. Ne pas le supprimer.
+   Copier chaque bloc tel quel.
+
+
+================================================================================
+   1. INSTALLER PYTHON
+================================================================================
+
+   Python n'est pas installé sur cette machine. Il faut le télécharger.
+
+   >> Ouvrir ce lien dans le navigateur :
+
+   https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe
+
+   >> L'installateur se télécharge automatiquement.
+   >> Double-cliquer dessus pour le lancer.
+
+   ╔══════════════════════════════════════════════════════════════════╗
+   ║                                                                ║
+   ║   COCHER LA CASE EN BAS :  [✓] Add python.exe to PATH         ║
+   ║                                                                ║
+   ║   PUIS CLIQUER SUR : "Install Now"                             ║
+   ║                                                                ║
+   ╚══════════════════════════════════════════════════════════════════╝
+
+   >> Attendre la fin de l'installation → Cliquer "Close"
+
+
+================================================================================
+   2. FERMER ET ROUVRIR POWERSHELL
+================================================================================
+
+   C'est obligatoire pour que le PATH soit pris en compte.
+   Fermer la fenêtre PowerShell actuelle (croix en haut à droite).
+   En ouvrir une nouvelle : Menu Démarrer → PowerShell.
+
+
+================================================================================
+   3. VERIFIER QUE PYTHON EST INSTALLE
+================================================================================
+
+   Copier-coller cette commande :
+
+python --version
+
+   >> Résultat attendu : Python 3.12.9
+
+   SI ça affiche encore "Python est introuvable" :
+   → Python n'a pas été ajouté au PATH pendant l'installation.
+   → Passer à la section "SI PYTHON N'EST PAS DANS LE PATH" plus bas.
+   → Sinon, continuer directement à l'étape 4.
+
+
+================================================================================
+   4. DESACTIVER LE RACCOURCI WINDOWS STORE
+================================================================================
+
+   Windows a un faux "python.exe" qui interfère. Le désactiver :
+
+   >> Ouvrir Paramètres Windows (touche Win + I)
+   >> Aller dans : Applications → Applications et fonctionnalités
+   >> Cliquer sur "Alias d'exécution d'application" (ou "App execution aliases")
+   >> Désactiver les deux lignes :
+         - "Programme d'installation d'application - python.exe"    → OFF
+         - "Programme d'installation d'application - python3.exe"   → OFF
+
+
+================================================================================
+   5. ALLER DANS LE DOSSIER DU PROJET
+================================================================================
+
+   Adaptez ce chemin selon l'endroit où vous avez copié livraison_dsi.
+   Exemples :
+
+cd C:\Users\cmbeac\Desktop\livraison_dsi
+
+   OU si c'est sur une clé USB :
+
+cd D:\livraison_dsi
+
+   Pour vérifier que vous êtes au bon endroit :
+
+dir app.py
+
+   >> Doit afficher le fichier app.py. Si "introuvable", le chemin est faux.
+
+
+================================================================================
+   6. AUTORISER LES SCRIPTS POWERSHELL
+================================================================================
+
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+
+   >> Si on demande confirmation, taper O puis Entrée.
+
+
+================================================================================
+   7. CREER L'ENVIRONNEMENT VIRTUEL
+================================================================================
+
+python -m venv venv
+
+
+================================================================================
+   8. ACTIVER L'ENVIRONNEMENT VIRTUEL
+================================================================================
+
+.\venv\Scripts\Activate.ps1
+
+   >> Le prompt doit maintenant afficher (venv) au début :
+   (venv) PS C:\Users\cmbeac\Desktop\livraison_dsi>
+
+
+================================================================================
+   9. METTRE A JOUR PIP
+================================================================================
+
+python -m pip install --upgrade pip
+
+
+================================================================================
+   10. INSTALLER LES PACKAGES
+================================================================================
+
+pip install -r requirements.txt
+
+   >> Attendre 2 à 5 minutes. Des lignes défilent, c'est normal.
+   >> A la fin, vérifier qu'il n'y a pas de ligne rouge "ERROR".
+
+
+================================================================================
+   11. VERIFIER L'INSTALLATION
+================================================================================
+
+python -c "import streamlit; import pandas; import openpyxl; import fitz; import pdfplumber; print('OK')"
+
+   >> Résultat attendu : OK
+
+
+================================================================================
+   12. LANCER L'APPLICATION
+================================================================================
+
+streamlit run app.py
+
+   >> Le navigateur s'ouvre automatiquement sur http://localhost:8501
+   >> Si le navigateur ne s'ouvre pas, copier ce lien dans le navigateur :
+      http://localhost:8501
+
+
+================================================================================
+================================================================================
+   SI PYTHON N'EST PAS DANS LE PATH (après l'étape 3)
+================================================================================
+================================================================================
+
+   Si "python --version" ne fonctionne pas après l'installation,
+   copier-coller CE BLOC EN ENTIER dans PowerShell :
+
+$dossier = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($dossier) {
+    $pythonDir = $dossier.FullName
+    $scriptsDir = "$pythonDir\Scripts"
+    $chemin = [System.Environment]::GetEnvironmentVariable("Path", "User")
+    [System.Environment]::SetEnvironmentVariable("Path", "$chemin;$pythonDir;$scriptsDir", "User")
+    Write-Host "Python ajoute au PATH : $pythonDir"
+    Write-Host "FERMEZ PowerShell et rouvrez-le, puis tapez : python --version"
+} else {
+    Write-Host "Python non trouve dans AppData. Cherchons ailleurs..."
+    Get-ChildItem "C:\Python*" -Directory -ErrorAction SilentlyContinue
+    Get-ChildItem "C:\Program Files\Python*" -Directory -ErrorAction SilentlyContinue
+    Write-Host "Si un dossier apparait ci-dessus, communiquez-le."
+}
+
+   >> Ensuite FERMER et ROUVRIR PowerShell.
+   >> Taper : python --version
+   >> Puis reprendre à l'étape 5.
+
+
+================================================================================
+   RELANCER L'APP LES FOIS SUIVANTES
+================================================================================
+
+   Tout est déjà installé, il suffit de :
+
+cd C:\Users\cmbeac\Desktop\livraison_dsi
+.\venv\Scripts\Activate.ps1
+streamlit run app.py
+
+
+================================================================================

@@ -1,0 +1,178 @@
+================================================================================
+   PDF SWIFT EXTRACTOR — Nettoyage complet de la machine (Windows / PowerShell)
+================================================================================
+
+   Ce fichier vous guide pour remettre la machine dans son état d'origine
+   après la présentation : suppression de l'environnement virtuel, des
+   fichiers du projet, et désinstallation de Python.
+
+   Ouvrez PowerShell en tant qu'administrateur.
+
+================================================================================
+   ÉTAPE 1 — Arrêter l'application si elle tourne encore
+================================================================================
+
+   Si l'application Streamlit est encore active dans un terminal :
+
+      Ctrl + C
+
+   Si vous ne savez pas si elle tourne, forcer l'arrêt :
+
+      Get-Process -Name python -ErrorAction SilentlyContinue | Stop-Process -Force
+
+
+================================================================================
+   ÉTAPE 2 — Désactiver l'environnement virtuel
+================================================================================
+
+   Si le prompt affiche "(venv)", taper :
+
+      deactivate
+
+
+================================================================================
+   ÉTAPE 3 — Supprimer le dossier du projet
+================================================================================
+
+   Cela supprime le code, l'environnement virtuel et toutes les
+   bibliothèques installées dedans (streamlit, pandas, etc.).
+
+   >> Adaptez le chemin selon l'emplacement réel :
+
+      cd ~\Desktop
+      Remove-Item -Recurse -Force .\livraison_dsi
+
+   ── Vérification ──
+
+      Test-Path .\livraison_dsi
+
+   >> Résultat attendu : False
+
+   ── Si erreur "cannot remove — file in use" ──
+
+   Un processus Python utilise encore des fichiers. Forcer l'arrêt :
+
+      Get-Process -Name python -ErrorAction SilentlyContinue | Stop-Process -Force
+      Remove-Item -Recurse -Force .\livraison_dsi
+
+
+================================================================================
+   ÉTAPE 4 — Désinstaller Python
+================================================================================
+
+   Méthode 1 — Via les Paramètres Windows (recommandé) :
+
+      1. Ouvrir Paramètres Windows (Win + I)
+      2. Aller dans "Applications" → "Applications installées"
+      3. Rechercher "Python"
+      4. Cliquer sur les trois points "..." → "Désinstaller"
+      5. Confirmer la désinstallation
+      6. Répéter pour chaque entrée Python (il peut y en avoir 2 :
+         "Python 3.12.x" et "Python Launcher")
+
+   Méthode 2 — Via PowerShell (automatique) :
+
+      $python = Get-Package -Name "Python*" -ErrorAction SilentlyContinue
+      if ($python) {
+          $python | Uninstall-Package -Force
+          Write-Host "Python désinstallé."
+      } else {
+          Write-Host "Python non trouvé dans les packages installés."
+          Write-Host "Utilisez la méthode 1 (Paramètres Windows)."
+      }
+
+   Méthode 3 — Via le panneau de configuration classique :
+
+      appwiz.cpl
+
+   >> Chercher "Python 3.12.x" → Clic droit → Désinstaller
+
+
+================================================================================
+   ÉTAPE 5 — Nettoyer le PATH (si nécessaire)
+================================================================================
+
+   Normalement, la désinstallation de Python retire automatiquement
+   les entrées du PATH. Pour vérifier :
+
+      $env:Path -split ";" | Where-Object { $_ -like "*Python*" }
+
+   >> Si rien ne s'affiche : ✓ le PATH est propre.
+
+   >> Si des chemins Python apparaissent, les retirer manuellement :
+
+      $currentPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+      $cleanPath = ($currentPath -split ";" | Where-Object { $_ -notlike "*Python*" }) -join ";"
+      [System.Environment]::SetEnvironmentVariable("Path", $cleanPath, "User")
+
+   Puis FERMER et ROUVRIR PowerShell.
+
+
+================================================================================
+   ÉTAPE 6 — Supprimer le cache pip et les fichiers résiduels
+================================================================================
+
+   Python laisse parfois des fichiers dans le profil utilisateur :
+
+      Remove-Item -Recurse -Force "$env:LOCALAPPDATA\pip" -ErrorAction SilentlyContinue
+      Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\Python" -ErrorAction SilentlyContinue
+      Remove-Item -Recurse -Force "$env:APPDATA\Python" -ErrorAction SilentlyContinue
+
+   Supprimer aussi le dossier de cache Streamlit :
+
+      Remove-Item -Recurse -Force "$env:USERPROFILE\.streamlit" -ErrorAction SilentlyContinue
+
+
+================================================================================
+   ÉTAPE 7 — Rétablir la politique d'exécution PowerShell
+================================================================================
+
+   Si vous aviez modifié la politique d'exécution lors de l'installation :
+
+      Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Restricted
+
+   >> Cela remet la restriction par défaut de Windows.
+
+
+================================================================================
+   ÉTAPE 8 — Vérification finale
+================================================================================
+
+   Taper ces commandes pour confirmer que tout est nettoyé :
+
+      python --version
+
+   >> Résultat attendu : "python : terme 'python' non reconnu..."
+      (ou "'python' is not recognized...")
+
+      pip --version
+
+   >> Résultat attendu : même type d'erreur (commande non reconnue)
+
+      Test-Path "$env:LOCALAPPDATA\Programs\Python"
+
+   >> Résultat attendu : False
+
+
+================================================================================
+   RÉSUMÉ — Commandes complètes (copier-coller)
+================================================================================
+
+   Tout d'un coup, après avoir arrêté l'application :
+
+      deactivate
+      cd ~\Desktop
+      Get-Process -Name python -ErrorAction SilentlyContinue | Stop-Process -Force
+      Remove-Item -Recurse -Force .\livraison_dsi
+      Remove-Item -Recurse -Force "$env:LOCALAPPDATA\pip" -ErrorAction SilentlyContinue
+      Remove-Item -Recurse -Force "$env:APPDATA\Python" -ErrorAction SilentlyContinue
+      Remove-Item -Recurse -Force "$env:USERPROFILE\.streamlit" -ErrorAction SilentlyContinue
+      Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy Restricted
+
+   >> Puis désinstaller Python via Paramètres Windows (Win + I) →
+      Applications → chercher "Python" → Désinstaller.
+
+
+================================================================================
+   La machine est revenue à son état d'origine.
+================================================================================

@@ -1,0 +1,578 @@
+"""
+=============================================================================
+ Extracteur MT202 — Virements interbancaires
+=============================================================================
+ Ce module extrait les données structurées depuis un message SWIFT MT202
+ (virement de banque à banque) contenu dans un fichier PDF.
+
+ Un message MT202 est composé de « champs » (fields) normalisés SWIFT :
+   - F20  : Référence de la transaction (numéro unique)
+   - F21  : Référence d'origine (lien avec un message antérieur)
+   - F32A : Date valeur + Devise + Montant
+   - F52A : Institution du donneur d'ordre (code BIC)
+   - F58A : Institution bénéficiaire (code BIC)
+   - F72  : Informations complémentaires (commentaires)
+
+ Ce module fournit également des fonctions utilitaires réutilisées par
+ les autres extracteurs (mt103, mt910, mt900) :
+   - get_field_block(text, label)  : Extraire un bloc de champ SWIFT du texte
+   - parse_amount(s)               : Convertir une chaîne montant → float
+   - parse_date_YYMMDD(s)          : Convertir date YYMMDD → ISO (YYYY-MM-DD)
+   - extract_text_from_pdf(path)   : Extraction texte depuis PDF (PyMuPDF/pdfplumber)
+   - extract_transaction_reference(): Référence robuste multi-formats
+   - detect_country_from_text()    : Détection pays CEMAC dans le texte
+
+ Variante 202.COV :
+   Le message MT202.COV (« Cover ») a la même structure mais inclut des
+   informations supplémentaires sur le donneur d'ordre final. Le type_MT
+   sera alors « fin.202.COV ».
+
+ Dépendances :
+   - pdfplumber : extraction texte PDF (fallback)
+   - PyMuPDF (fitz) : extraction texte PDF rapide (~50x plus rapide)
+   - python-dateutil : parsing de dates flexibles
+   - bic_utils : résolution code BIC → nom de banque
+============================================================================="""
+
+import re
+from datetime import datetime
+from typing import Optional
+from dateutil import parser as dateparser
+import pdfplumber
+
+# bic helper (may return "CODE/Name" or "CODE")
+try:
+    from extractors.bic_utils import get_donneur_from_f52, map_code_to_name
+except Exception:
+    # fallback: define no-op functions if bic_utils missing
+    def get_donneur_from_f52(*a, **k):
+        return None
+    def map_code_to_name(*a, **k):
+        return None
+
+# regex / constants
+BIC_RE = re.compile(r'\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b')
+MT_RE = re.compile(r'\b(?:MT|FIN)[\s\-_]*(\d{3})\b', re.I)
+
+# Pre-compiled regex patterns for performance
+_COUNTRY_CODE_PATTERN = re.compile(r'\b([A-Z]{2})\b')
+_AMOUNT_PATTERN = re.compile(r'\b\d{1,3}(?:[.\s]\d{3})*(?:[.,]\d{1,2})\b')
+_AMOUNT_DECIMAL_PATTERN = re.compile(r'\d+[.,]\d{2}')
+_F20_SAME_LINE_PATTERN = re.compile(r'(?mi)^(?:\:20\:|F20[:\s]*)(.*)$', re.M)
+_F20_LABEL_PATTERN = re.compile(r'(?mi)^\s*(?:F20[:\s]*|:20:)')
+_TRANSACTION_REF_PATTERN = re.compile(r'(?mi)Transaction\s+Reference\s*:\s*(.+?)(?:\n|$)')
+_TRANSACTION_REF_TOKEN_PATTERN = re.compile(r'(?mi)Transaction\s+Reference\s*[:\s]*([A-Z0-9\-\_/]{3,})')
+_F20_END_LINE_PATTERN = re.compile(r'(?mi)(?:F20[:\s]*|:20:)\s*$', re.M)
+_TOKEN_PATTERN = re.compile(r'([A-Z0-9\-\_/]{3,})', re.I)
+_SENDER_CHECK_PATTERN = re.compile(r'Sender\s*:')
+_NAMEADDRESS_PATTERN = re.compile(r'NameAndAddress:.*?:\s*(.+?)(?:\n|$)', re.DOTALL | re.I)
+_DETAILS_PATTERN = re.compile(r'Details:\s*Détails:\s*(.+)', re.I)
+
+# Pre-compiled sets for O(1) lookup
+_ADDRESS_SKIP_WORDS = frozenset(['BP ', 'BOULEVARD', 'CM/', 'YAOUNDE', 'DOUALA', 'LIBREVILLE'])
+_LABEL_SKIP_WORDS = frozenset(['INSTITUTION', 'IDENTIFIANT', 'NAMEANDADDRESS', 'NOM ET ADRESSE'])
+_INVALID_DONNEUR_WORDS = frozenset(['IDENTIFIANT', 'INSTITUTION', 'IDENTIFIER', 'CODE', 'NAMEANDADDRESS'])
+
+# Codes ISO 4217 valides
+VALID_CURRENCIES = {
+    'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD',
+    'CNY', 'INR', 'RUB', 'BRL', 'MXN', 'SGD', 'HKD', 'KRW',
+    'XAF', 'XOF', 'XPF', 'CFA',
+    'ZAR', 'NGN', 'KES', 'EGP',
+    'TND', 'MAD', 'AED', 'SAR', 'ILS',
+    'THB', 'MYR', 'PHP', 'IDR', 'VND',
+    'PKR', 'BDT', 'LKR',
+}
+
+CEMAC_MAP = {
+    "CM": "CMR", "CMR": "CMR", "CAMEROON": "CMR",
+    "GA": "GAB", "GAB": "GAB", "GABON": "GAB",
+    "TD": "TCD", "TCD": "TCD", "CHAD": "TCD",
+    "CG": "COG", "COG": "COG", "CONGO": "COG",
+    "GQ": "GNQ", "GNQ": "GNQ", "EQUATORIAL GUINEA": "GNQ",
+    "CF": "CAF", "CAF": "CAF", "CENTRAL AFRICAN REPUBLIC": "CAF"
+}
+
+# Pre-compiled regex patterns for performance optimization
+_COUNTRY_CODE_PATTERN = re.compile(r'\b[A-Z]{2}\b')
+_COUNTRY_CODES_SET = frozenset(CEMAC_MAP.keys())
+_COUNTRY_CODES_LONG = frozenset(k for k in CEMAC_MAP if len(k) > 2)
+
+# Try to import PyMuPDF for faster PDF extraction
+try:
+    import fitz as pymupdf
+    HAS_PYMUPDF = True
+except ImportError:
+    HAS_PYMUPDF = False
+
+# ---------- PDF text extractor ----------
+def extract_text_from_pdf(path):
+    """
+    Extract text from PDF using PyMuPDF (fast) or pdfplumber (fallback).
+    PyMuPDF is ~50x faster than pdfplumber.
+    """
+    txt = ""
+    
+    # Try PyMuPDF first (much faster)
+    if HAS_PYMUPDF:
+        try:
+            doc = pymupdf.open(str(path))
+            for page in doc:
+                txt += "\n" + page.get_text()
+            doc.close()
+        except Exception:
+            txt = ""
+    
+    # Fallback to pdfplumber
+    if not txt:
+        with pdfplumber.open(str(path)) as pdf:
+            for page in pdf.pages:
+                txt += "\n" + (page.extract_text() or "")
+    
+    # minor normalization
+    txt = re.sub(r'(?mi)^\s*page\s+\d+\s*(?:of\s*\d+)?\s*$', '', txt, flags=re.M)
+    txt = re.sub(r'\r', '\n', txt)
+    # collapse excessive blank lines but keep paragraph separation
+    txt = re.sub(r'\n{3,}', '\n\n', txt)
+    return txt
+
+# ---------- low-level helpers ----------
+def get_field_block(text: str, field_label: str) -> Optional[str]:
+    """
+    Return the multiline text belonging to a tag Fxx (e.g. 'F52A' or 'F20') inside `text`.
+    """
+    if not text:
+        return None
+    # Try label with optional trailing colon/description and capture following lines until next Fxx or end
+    pattern = re.compile(r'(?si)(' + re.escape(field_label) + r'[:\s]*)(.*?)(?=\nF\d{2}[A-Z]?:|\nF\d{2}\b|$)')
+    m = pattern.search(text)
+    return m.group(2).strip() if m else None
+
+def parse_amount(s: Optional[str]) -> Optional[float]:
+    if not s:
+        return None
+    s = s.strip()
+    # keep digits, thousand separators, decimal separators, minus
+    s = re.sub(r'[^\d,.\-\s]', '', s)
+    s = s.replace('\xa0', ' ')
+    # normalize: detect whether comma is decimal or dot is decimal
+    if s.count(',') and s.count('.'):
+        # decide by last separator position
+        if s.rfind(',') > s.rfind('.'):
+            # comma decimal -> remove dots (thousand), replace comma with dot
+            s = s.replace('.', '').replace(',', '.')
+        else:
+            # dot decimal -> remove commas
+            s = s.replace(',', '')
+    else:
+        if s.count(','):
+            # comma may be decimal if last group length 1-2 digits
+            idx = s.rfind(',')
+            if len(s) - idx - 1 in (1, 2):
+                s = s.replace('.', '').replace(',', '.')
+            else:
+                s = s.replace(',', '')
+        else:
+            # no comma, remove spaces
+            s = s.replace(' ', '')
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+def parse_date_YYMMDD(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    s = s.strip()
+    if re.fullmatch(r'\d{6}', s):
+        yy = int(s[:2]); mm = int(s[2:4]); dd = int(s[4:6])
+        year = 2000 + yy
+        try:
+            return datetime(year, mm, dd).date().isoformat()
+        except Exception:
+            return None
+    try:
+        d = dateparser.parse(s, dayfirst=False)
+        return d.date().isoformat() if d else None
+    except Exception:
+        return None
+
+def detect_country_from_text(txt: str) -> Optional[str]:
+    """
+    Detect country code from text using CEMAC_MAP.
+    OPTIMIZED: Check 2-letter codes first (fastest), then longer names.
+    Pre-compiled regex for ~2x performance improvement.
+    """
+    if not txt:
+        return None
+    
+    txtu = txt.upper()
+    
+    # OPTIMIZED: Check 2-letter codes FIRST (most common, fastest)
+    # Using pre-compiled regex pattern
+    for match in _COUNTRY_CODE_PATTERN.finditer(txtu):
+        code = match.group()
+        if code in CEMAC_MAP:
+            return CEMAC_MAP[code]
+    
+    # Check longer country names only if 2-letter codes not found
+    for key in _COUNTRY_CODES_LONG:
+        if key in txtu:
+            return CEMAC_MAP[key]
+    
+    return None
+
+# ---------- helpers for reference robustness ----------
+def _looks_like_amount(s: Optional[str]) -> bool:
+    if not s:
+        return False
+    s_low = s.lower()
+    if 'amount' in s_low or 'currency' in s_low or 'montant' in s_low:
+        return True
+    # Use pre-compiled patterns
+    if _AMOUNT_PATTERN.search(s) or _AMOUNT_DECIMAL_PATTERN.search(s):
+        return True
+    return False
+
+def extract_transaction_reference(full_text: str, block4_text: Optional[str]) -> Optional[str]:
+    """
+    Robust extraction of transaction reference.
+    Priority:
+      0) For outgoing messages (with "Sender:" header), prefer "Transaction Reference: TOKEN" first
+      1) F20 / :20: inside block4 (handles value on next non-empty line)
+      2) header 'Transaction Reference: <TOKEN>' (token = [A-Z0-9_-/]{3,})
+      3) safe fallback: small token search but avoid picking amounts
+    Returns uppercase reference or None.
+    """
+    # 0) Particularité des messages sortants: si "Sender:" présent, prioriser le header "Transaction Reference:"
+    if _SENDER_CHECK_PATTERN.search(full_text):
+        # Messages sortants ont le format "Transaction Reference: 8101/0650/CM" directement
+        m_header = _TRANSACTION_REF_PATTERN.search(full_text)
+        if m_header:
+            cand = m_header.group(1).strip()
+            if cand and not _looks_like_amount(cand):
+                return cand.upper()
+    
+    # 1) try block4 / F20
+    b = block4_text or ""
+    if b:
+        # same-line pattern: "F20: S065..." or ":20:S065..."
+        m = _F20_SAME_LINE_PATTERN.search(b)
+        if m:
+            cand = m.group(1).strip()
+            if not cand:
+                # find next non-empty line after the matched line
+                lines = b.splitlines()
+                for i, ln in enumerate(lines):
+                    if _F20_LABEL_PATTERN.match(ln):
+                        j = i + 1
+                        while j < len(lines) and not lines[j].strip():
+                            j += 1
+                        if j < len(lines):
+                            cand = lines[j].strip()
+                        break
+            if cand and not _looks_like_amount(cand):
+                tok = _TOKEN_PATTERN.search(cand)
+                if tok:
+                    return tok.group(1).upper()
+        else:
+            # handle label on its own line and value on next line:
+            lines = b.splitlines()
+            for i, ln in enumerate(lines):
+                if _F20_LABEL_PATTERN.match(ln):
+                    # see if same-line value
+                    same = _F20_LABEL_PATTERN.sub('', ln).strip()
+                    if same:
+                        cand = same
+                    else:
+                        j = i + 1
+                        while j < len(lines) and not lines[j].strip():
+                            j += 1
+                        cand = lines[j].strip() if j < len(lines) else ""
+                    if cand and not _looks_like_amount(cand):
+                        tok = _TOKEN_PATTERN.search(cand)
+                        if tok:
+                            return tok.group(1).upper()
+                    break
+
+    # 2) header "Transaction Reference: TOKEN"
+    m2 = _TRANSACTION_REF_TOKEN_PATTERN.search(full_text)
+    if m2:
+        cand = m2.group(1).strip()
+        if not _looks_like_amount(cand):
+            return cand.upper()
+
+    # 3) safe fallback: look for a line immediately after "F20" label anywhere in full_text
+    m_label = _F20_END_LINE_PATTERN.search(full_text)
+    if m_label:
+        # find the position, then take next non-empty line
+        pos = m_label.end()
+        tail = full_text[pos: pos + 400]
+        lines = tail.splitlines()
+        for ln in lines:
+            ln = ln.strip()
+            if not ln:
+                continue
+            if not _looks_like_amount(ln):
+                tok = _TOKEN_PATTERN.search(ln)
+                if tok:
+                    return tok.group(1).upper()
+            break
+
+    # nothing reliable
+    return None
+
+# provide parse_reference wrapper for backwards compatibility
+def parse_reference(text: str) -> Optional[str]:
+    """
+    Backwards-compatible wrapper expected by mt103: compute an appropriate block4
+    (prefer F20 or Block 4) and call the robust extractor.
+    """
+    if not text:
+        return None
+    block4 = get_field_block(text, 'F20') or get_field_block(text, ':20') or get_field_block(text, 'Block 4') or get_field_block(text, 'Block4') or text
+    return extract_transaction_reference(text, block4)
+
+# ---------- field parsers ----------
+def parse_f32a(text: str) -> dict:
+    """
+    Parse F32A block (or fallback to text) and return dict with:
+    {'date_reference': iso-date or None, 'devise': 'USD'|'EUR'|..., 'montant': float or None}
+    """
+    blk = get_field_block(text, 'F32A') or text or ""
+    blk_clean = re.sub(r'#.*?#', '', blk, flags=re.S)
+    res = {'date_reference': None, 'devise': None, 'montant': None}
+
+    # date: try explicit Date: 251222 or a 6-digit token
+    m_date = re.search(r'(?i)\bDate[:\s]*([0-9]{6})\b', blk_clean)
+    if m_date:
+        res['date_reference'] = parse_date_YYMMDD(m_date.group(1))
+    else:
+        m_date2 = re.search(r'(\d{6})', blk_clean)
+        if m_date2:
+            res['date_reference'] = parse_date_YYMMDD(m_date2.group(1))
+
+    # currency: try strict pattern "Currency: Devise: XXX" first (3 uppercase letters without spaces)
+    m_cur_strict = re.search(r'(?i)Currency\s*[:\s]+Devise\s*[:\s]+([A-Z]{3})\b', blk_clean)
+    if m_cur_strict:
+        candidate = m_cur_strict.group(1).upper()
+        # Vérifier si c'est un code devise valide
+        if candidate in VALID_CURRENCIES:
+            res['devise'] = candidate
+    
+    # Fallback: chercher "Devise:" ou "Currency:" avec 3 lettres
+    if not res['devise']:
+        m_cur = re.search(r'(?i)\b(?:Devise|Currency)[:\s\S]{0,40}?([A-Z]{3})\b', blk_clean)
+        if m_cur:
+            candidate = m_cur.group(1).upper()
+            if candidate in VALID_CURRENCIES:
+                res['devise'] = candidate
+    
+    # Final fallback: chercher n'importe quel code valide dans le bloc
+    if not res['devise']:
+        m_cur2 = re.search(r'\b([A-Z]{3})\b', blk_clean)
+        if m_cur2:
+            candidate = m_cur2.group(1).upper()
+            if candidate in VALID_CURRENCIES:
+                res['devise'] = candidate
+
+    # amount: prefer explicit "Montant|Amount" line
+    candidate = None
+    m_line = re.search(r'(?im)^\s*(?:Montant|Amount)\s*[:\-]\s*(.*)$', blk_clean, flags=re.M)
+    if m_line:
+        line = m_line.group(1).strip()
+        nums = re.findall(r'([0-9]+(?:[.,\s][0-9]{1,3})*(?:[.,][0-9]{1,2})?)', line)
+        if nums:
+            def digits_len(s): return len(re.sub(r'[^0-9]', '', s))
+            candidate = max(nums, key=digits_len)
+    if not candidate:
+        # fallback: pick the longest numeric-looking token in block
+        nums_all = re.findall(r'([0-9]+(?:[.,\s][0-9]{1,3})*(?:[.,][0-9]{1,2})?)', blk_clean)
+        if nums_all:
+            def digits_len(s): return len(re.sub(r'[^0-9]', '', s))
+            candidate = max(nums_all, key=digits_len)
+    if candidate:
+        res['montant'] = parse_amount(candidate)
+    return res
+
+def extract_receiver_bic(text: str) -> Optional[str]:
+    """
+    Try to extract the receiver BIC from header 'Receiver:' or anywhere in the text.
+    Returns first matched BIC-like token or None.
+    """
+    if not text:
+        return None
+    # try 'Receiver:' block
+    m = re.search(r'(?i)Receiver\s*[:\-]?\s*(.*?)(?=\n[A-Z][a-z]|$)', text, re.S)
+    if m:
+        part = m.group(1)
+        m2 = BIC_RE.search(part)
+        if m2:
+            return m2.group(0)
+    # fallback: search nearby 'RECEIVER' text region
+    idx = text.upper().find('RECEIVER')
+    if idx >= 0:
+        tail = text[idx: idx + 400]
+        m2 = BIC_RE.search(tail)
+        if m2:
+            return m2.group(0)
+    # final fallback: any BIC-looking token in document
+    m_any = BIC_RE.findall(text)
+    return m_any[0] if m_any else None
+
+# Pre-compiled set for address skip words (O(1) lookup)
+_ADDRESS_SKIP_WORDS = frozenset(['BP ', 'BOULEVARD', 'CM/', 'YAOUNDE', 'DOUALA', 'LIBREVILLE'])
+_LABEL_SKIP_WORDS = frozenset(['INSTITUTION', 'IDENTIFIANT', 'NAMEANDADDRESS', 'NOM ET ADRESSE'])
+
+def extract_name_from_f50f(f50f_text: str) -> Optional[str]:
+    """
+    Extract client/institution name from F50F field (outgoing MT103 messages specific).
+    Format: "Details: Détails: CLIENT NAME" across multiple lines
+    Returns the concatenated name or None.
+    """
+    if not f50f_text:
+        return None
+    
+    # Look for "Details:" lines and extract names
+    details_lines = []
+    for line in f50f_text.splitlines():
+        # Use pre-compiled pattern
+        m = _DETAILS_PATTERN.search(line)
+        if m:
+            detail = m.group(1).strip()
+            # Use set for O(1) lookup
+            if detail and not any(skip in detail.upper() for skip in _ADDRESS_SKIP_WORDS):
+                details_lines.append(detail)
+                if len(details_lines) >= 2:  # Take first 2 lines for name
+                    break
+    
+    if details_lines:
+        return ' '.join(details_lines)
+    
+    # Fallback: look for NameAndAddress section
+    m = re.search(r'NameAndAddress:.*?Details:\s*Détails:\s*(.+?)(?:\n|$)', f50f_text, re.DOTALL | re.I)
+    if m:
+        return m.group(1).strip()
+    
+    return None
+
+def extract_name_from_f52d(f52d_text: str) -> Optional[str]:
+    """
+    Extract institution name from F52D field (outgoing messages specific).
+    Format: "NameAndAddress: Nom et adresse: BANK NAME"
+    Returns the bank name or None.
+    """
+    if not f52d_text:
+        return None
+    
+    # Look for "NameAndAddress:" followed by name (use pre-compiled pattern)
+    m = _NAMEADDRESS_PATTERN.search(f52d_text)
+    if m:
+        name = m.group(1).strip()
+        # Clean up if multiline - take first line
+        if '\n' in name:
+            name = name.split('\n')[0].strip()
+        return name if name else None
+    
+    # Fallback: take the last non-empty line that looks like a name
+    lines = [ln.strip() for ln in f52d_text.splitlines() if ln.strip()]
+    for ln in reversed(lines):
+        up = ln.upper()
+        # Skip label lines (use set for O(1) lookup)
+        if any(label in up for label in _LABEL_SKIP_WORDS):
+            continue
+        # If line contains letters and looks like a name
+        if re.search(r'[A-Z]{3,}', up) and not re.fullmatch(r'[A-Z0-9]{8,11}', up.replace(' ', '')):
+            return ln
+    
+    return None
+
+# ---------- main extractor for text-block ----------
+def extract_from_text(text: str, source: str = None) -> dict:
+    row = {
+        "type_MT": None,
+        "code_banque": None,
+        "sender_bic": None,
+        "receiver_bic": None,
+        "reference": None,
+        "date_reference": None,
+        "devise": None,
+        "montant": None,
+        "donneur_dordre": None,
+        "beneficiaire": None,
+        "pays_iso3": None,
+        "source_pdf": source
+    }
+
+    # type_MT detection - try Identifier pattern first, then MT_RE
+    # Pattern 1: "Identifier: fin.202" format (preferred)
+    m_identifier = re.search(r'(?i)Identifier\s*:\s*fin\.(\d{3})', text)
+    if m_identifier:
+        row["type_MT"] = f"fin.{m_identifier.group(1)}"
+    else:
+        # Pattern 2: "MT 202" or "FIN 202" format (fallback)
+        m = MT_RE.search(text)
+        if m:
+            row["type_MT"] = f"fin.{m.group(1)}".lower()
+
+    # receiver BIC (prefer header)
+    rb = extract_receiver_bic(text)
+    row["code_banque"] = rb
+    row["receiver_bic"] = rb
+
+    # robust reference extraction : prefer F20 inside block4 if present
+    block4 = get_field_block(text, 'Block 4') or get_field_block(text, 'Block4') or text
+    # also try F20 block explicitly
+    f20_block = get_field_block(text, 'F20') or get_field_block(text, ':20') or None
+    # choose block4_text as f20_block if present else block4
+    block4_text = f20_block or block4
+    row["reference"] = extract_transaction_reference(text, block4_text)
+
+    # parse amount/date/currency from F32A or text
+    f32 = parse_f32a(text)
+    row["date_reference"] = f32.get('date_reference')
+    row["devise"] = f32.get('devise')
+    row["montant"] = f32.get('montant')
+
+    # F52A: use bic_utils.get_donneur_from_f52 to produce CODE/NAME or CODE
+    # Cas particulier messages sortants: essayer aussi F52D si F52A absent
+    f52_block = get_field_block(text, 'F52A') or get_field_block(text, 'F52A:')
+    f52d_block = None
+    if not f52_block:
+        # Messages sortants peuvent avoir F52D au lieu de F52A
+        f52_block = get_field_block(text, 'F52D') or get_field_block(text, 'F52D:')
+        f52d_block = f52_block  # Remember we got F52D
+    
+    try:
+        donneur = get_donneur_from_f52(f52_block or "", message_text=text)
+        # Cas particulier: si get_donneur_from_f52 retourne un mot invalide (IDENTIFIANT, INSTITUTION, etc.)
+        # et on a F52D, extraire le vrai nom de F52D
+        if donneur and f52d_block:
+            # Check if donneur is a label word (not a real bank name) - use set for O(1) lookup
+            if any(word in donneur.upper() for word in _INVALID_DONNEUR_WORDS):
+                name_from_f52d = extract_name_from_f52d(f52d_block)
+                if name_from_f52d:
+                    donneur = name_from_f52d
+    except Exception:
+        donneur = None
+    row["donneur_dordre"] = donneur
+
+    # payer/beneficiary names: try F59/F58 blocks if present (simple best-effort)
+    f59 = get_field_block(text, 'F59') or get_field_block(text, 'F58') or None
+    if f59:
+        # pick first non-empty line as beneficiary readable text
+        lines = [ln.strip() for ln in f59.splitlines() if ln.strip()]
+        if lines:
+            row["beneficiaire"] = lines[0] if not row.get("beneficiaire") else row.get("beneficiaire")
+
+    # country detection will be done from BIC mapping in mt_multi post-processing
+    # row["pays_iso3"] = detect_country_from_text(text)  # removed: use BIC mapping only
+
+    return row
+
+def extract_block(block_text: str, source: str = None) -> dict:
+    return extract_from_text(block_text, source=source)
+
+def extract_for_mt202(pdf_path):
+    txt = extract_text_from_pdf(pdf_path)
+    return extract_from_text(txt, source=getattr(pdf_path, "name", str(pdf_path)))

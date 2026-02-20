@@ -1,0 +1,324 @@
+================================================================================
+   PDF SWIFT EXTRACTOR — Guide d'installation pas à pas (Windows / PowerShell)
+================================================================================
+
+   Ce fichier vous guide de A à Z pour installer et lancer l'application
+   sur une machine Windows vierge (sans Python ni bibliothèques).
+
+   Ouvrez PowerShell en tant qu'administrateur et suivez chaque étape.
+
+================================================================================
+   ÉTAPE 0 — Ouvrir PowerShell en administrateur
+================================================================================
+
+   Clic droit sur le menu Démarrer → "Terminal (administrateur)"
+   ou rechercher "PowerShell" → Clic droit → "Exécuter en tant qu'administrateur"
+
+
+================================================================================
+   ÉTAPE 1 — Installer Python
+================================================================================
+
+   Télécharger Python depuis le site officiel :
+
+   >> Ouvrir ce lien dans un navigateur :
+   https://www.python.org/downloads/
+
+   >> Télécharger Python 3.12.x (bouton jaune "Download Python 3.12.x")
+
+   ╔══════════════════════════════════════════════════════════════════════╗
+   ║  IMPORTANT : Lors de l'installation, COCHER la case :              ║
+   ║                                                                    ║
+   ║     [✓] "Add python.exe to PATH"                                   ║
+   ║                                                                    ║
+   ║  C'est en bas de la première fenêtre de l'installateur.            ║
+   ║  Si vous oubliez cette case, rien ne fonctionnera ensuite.         ║
+   ╚══════════════════════════════════════════════════════════════════════╝
+
+   >> Cliquer sur "Install Now" (installation par défaut)
+   >> Attendre la fin → cliquer "Close"
+
+   ── Vérification ──
+
+   FERMER le PowerShell actuel et en ROUVRIR un nouveau (pour prendre en
+   compte le PATH mis à jour), puis taper :
+
+      python --version
+
+   >> Résultat attendu : Python 3.12.x
+
+   ── Si "python" n'est pas reconnu ──
+
+   Cela signifie que Python n'a pas été ajouté au PATH.
+   Solution 1 : Relancer l'installateur Python → "Modify" → cocher "Add to PATH"
+   Solution 2 : Ajouter manuellement le chemin au PATH :
+
+      $pythonPath = "$env:LOCALAPPDATA\Programs\Python\Python312"
+      [System.Environment]::SetEnvironmentVariable("Path", "$env:Path;$pythonPath;$pythonPath\Scripts", "User")
+
+   Puis FERMER et ROUVRIR PowerShell.
+
+
+================================================================================
+   ÉTAPE 2 — Autoriser l'exécution de scripts PowerShell
+================================================================================
+
+   Par défaut, Windows bloque l'exécution de scripts. Il faut autoriser
+   au moins la session en cours :
+
+      Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+
+   >> Répondre "O" (Oui) si on vous demande confirmation.
+
+
+================================================================================
+   ÉTAPE 3 — Se placer dans le dossier du projet
+================================================================================
+
+   Naviguer jusqu'au dossier "livraison_dsi" copié sur la machine.
+   Adaptez le chemin selon l'emplacement réel du dossier :
+
+      cd C:\Users\VOTRE_NOM\Desktop\livraison_dsi
+
+   ── Vérification ──
+
+      dir
+
+   >> Vous devez voir : app.py, extractor_manager.py, utils.py,
+      requirements.txt, Dockerfile, extractors\, data\, etc.
+
+
+================================================================================
+   ÉTAPE 4 — Créer un environnement virtuel Python
+================================================================================
+
+   Un environnement virtuel isole les bibliothèques du projet pour
+   éviter les conflits avec d'autres installations.
+
+      python -m venv venv
+
+   ── Si erreur "No module named venv" ──
+
+      pip install virtualenv
+      python -m virtualenv venv
+
+
+================================================================================
+   ÉTAPE 5 — Activer l'environnement virtuel
+================================================================================
+
+      .\venv\Scripts\Activate.ps1
+
+   >> Le prompt change et affiche "(venv)" au début de la ligne.
+      Exemple : (venv) PS C:\Users\...\livraison_dsi>
+
+   ── Si erreur "cannot be loaded because running scripts is disabled" ──
+
+   Vous n'avez pas fait l'étape 2. Exécuter :
+
+      Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+
+   Puis réessayer :
+
+      .\venv\Scripts\Activate.ps1
+
+
+================================================================================
+   ÉTAPE 6 — Mettre à jour pip
+================================================================================
+
+   Avant d'installer les dépendances, mettre pip à jour :
+
+      python -m pip install --upgrade pip
+
+
+================================================================================
+   ÉTAPE 7 — Installer les dépendances
+================================================================================
+
+      pip install -r requirements.txt
+
+   >> L'installation prend 2 à 5 minutes selon la connexion internet.
+   >> Vous verrez défiler les téléchargements et installations.
+
+   ── Si erreur sur PyMuPDF ──
+
+   Sur certaines machines, PyMuPDF nécessite des outils de compilation.
+   Essayer d'abord :
+
+      pip install PyMuPDF
+
+   Si ça échoue encore, installer une version pré-compilée (wheel) :
+
+      pip install --only-binary=:all: PyMuPDF
+
+   ── Si erreur "Microsoft Visual C++ 14.0 or greater is required" ──
+
+   Installer les outils de compilation Microsoft :
+   >> Télécharger "Build Tools for Visual Studio" :
+      https://visualstudio.microsoft.com/visual-cpp-build-tools/
+   >> Installer → cocher "Outils de build C++"
+   >> Redémarrer PowerShell et recommencer pip install
+
+   ── Si erreur de timeout / connexion ──
+
+   Réessayer avec un délai plus long :
+
+      pip install -r requirements.txt --timeout 120
+
+   Ou utiliser un miroir PyPI :
+
+      pip install -r requirements.txt -i https://pypi.org/simple/
+
+   ── Si erreur sur pdfminer.six ──
+
+      pip install "pdfminer.six==20251107"
+
+   (Les guillemets sont importants à cause du point dans le nom)
+
+
+================================================================================
+   ÉTAPE 8 — Vérifier que tout est installé
+================================================================================
+
+      pip list
+
+   >> Vérifier la présence de : streamlit, pandas, openpyxl,
+      pdfplumber, PyMuPDF, pillow, python-dateutil
+
+   Test rapide d'import :
+
+      python -c "import streamlit; import pandas; import openpyxl; import fitz; import pdfplumber; print('OK — Toutes les dépendances sont installées.')"
+
+   >> Résultat attendu : "OK — Toutes les dépendances sont installées."
+
+   ── Si ModuleNotFoundError ──
+
+   Réinstaller le module manquant :
+
+      pip install NOM_DU_MODULE
+
+
+================================================================================
+   ÉTAPE 9 — Vérifier la présence du fichier de données BIC
+================================================================================
+
+      Test-Path .\data\bic_codes.xlsx
+
+   >> Résultat attendu : True
+
+   ── Si False ──
+
+   Le fichier de référentiel BIC est manquant. Vérifiez que le dossier
+   "data" contenant "bic_codes.xlsx" a bien été copié avec le projet.
+
+
+================================================================================
+   ÉTAPE 10 — Lancer l'application
+================================================================================
+
+      streamlit run app.py
+
+   >> L'application démarre. Vous verrez s'afficher :
+
+      You can now view your Streamlit app in your browser.
+      Local URL: http://localhost:8501
+
+   >> Votre navigateur par défaut s'ouvre automatiquement.
+      Si ce n'est pas le cas, ouvrir manuellement :
+
+         http://localhost:8501
+
+   ── Si le navigateur ne s'ouvre pas automatiquement ──
+
+      streamlit run app.py --server.headless false
+
+   ── Si erreur "streamlit is not recognized" ──
+
+   L'environnement virtuel n'est pas activé. Refaire :
+
+      .\venv\Scripts\Activate.ps1
+      streamlit run app.py
+
+   ── Si le port 8501 est occupé ──
+
+      streamlit run app.py --server.port 8502
+
+   Puis ouvrir http://localhost:8502
+
+   ── Si erreur "Address already in use" ──
+
+   Tuer le processus qui utilise le port :
+
+      netstat -ano | findstr :8501
+      taskkill /PID <NUMERO_PID> /F
+
+   Puis relancer : streamlit run app.py
+
+
+================================================================================
+   ARRÊTER L'APPLICATION
+================================================================================
+
+   Dans le PowerShell où l'application tourne, appuyer sur :
+
+      Ctrl + C
+
+   Puis confirmer si demandé.
+
+
+================================================================================
+   RELANCER L'APPLICATION (les fois suivantes)
+================================================================================
+
+   Les fois suivantes, Python et les bibliothèques sont déjà installés.
+   Il suffit de :
+
+      cd C:\Users\VOTRE_NOM\Desktop\livraison_dsi
+      .\venv\Scripts\Activate.ps1
+      streamlit run app.py
+
+
+================================================================================
+   RÉSUMÉ — Commandes complètes (copier-coller)
+================================================================================
+
+   Si vous voulez tout exécuter d'un coup (après avoir installé Python) :
+
+      Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+      cd C:\Users\VOTRE_NOM\Desktop\livraison_dsi
+      python -m venv venv
+      .\venv\Scripts\Activate.ps1
+      python -m pip install --upgrade pip
+      pip install -r requirements.txt
+      streamlit run app.py
+
+
+================================================================================
+   AIDE — Problèmes fréquents
+================================================================================
+
+   PROBLÈME : L'application affiche un tableau vide après extraction
+   CAUSE    : Le PDF ne contient pas de messages SWIFT reconnus
+   SOLUTION : Vérifier que le PDF contient des messages MT103/MT202/MT910
+
+   PROBLÈME : Les noms de banques sont vides dans l'Excel
+   CAUSE    : Le code BIC n'est pas dans le référentiel
+   SOLUTION : Ajouter le BIC via l'interface (onglet "Ajouter un code BIC")
+              ou directement dans data\bic_codes.xlsx
+
+   PROBLÈME : Erreur "No module named 'extractors'"
+   CAUSE    : Vous n'êtes pas dans le bon répertoire
+   SOLUTION : cd C:\...\livraison_dsi (le dossier contenant app.py)
+
+   PROBLÈME : L'écran est vide / erreur 404
+   CAUSE    : Streamlit n'a pas fini de démarrer
+   SOLUTION : Attendre 10 secondes et rafraîchir la page (F5)
+
+   PROBLÈME : Python plante avec une erreur de mémoire
+   CAUSE    : PDF trop volumineux (>100 Mo)
+   SOLUTION : Découper le PDF en fichiers plus petits
+
+================================================================================
+   Fin du guide — Bonne présentation !
+================================================================================

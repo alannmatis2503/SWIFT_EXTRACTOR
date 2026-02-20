@@ -1,0 +1,354 @@
+{
+  "Citi euro.pdf_incoming": {
+    "total": 4,
+    "normal": 3,
+    "beaccmcx091": 1,
+    "exc_323201": 0,
+    "other_exc": 0,
+    "types": {
+      "fin.910": 2,
+      "fin.900": 2
+    },
+    "sample_rows": [
+      {
+        "type_MT": "fin.910",
+        "reference": "3603098181",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 1480000.0,
+        "code_donneur_dordre": "CITIGALXXXX",
+        "donneur_dordre": "Citibank Gabon",
+        "beneficiaire": "Citibank Gabon",
+        "pays_iso3": "GAB",
+        "commentaires": null,
+        "source_pdf": "voir message N°3 du fichier Citi euro.pdf"
+      },
+      {
+        "type_MT": "fin.900",
+        "reference": "3603058342",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 1000000.0,
+        "code_donneur_dordre": "CENTRALE",
+        "donneur_dordre": "CENTRALE",
+        "beneficiaire": null,
+        "pays_iso3": null,
+        "commentaires": null,
+        "source_pdf": "voir message N°4 du fichier Citi euro.pdf"
+      },
+      {
+        "type_MT": "fin.900",
+        "reference": "3603058225",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 172200.0,
+        "code_donneur_dordre": "CENTRALE",
+        "donneur_dordre": "CENTRALE",
+        "beneficiaire": null,
+        "pays_iso3": null,
+        "commentaires": null,
+        "source_pdf": "voir message N°5 du fichier Citi euro.pdf"
+      },
+      {
+        "type_MT": "fin.910",
+        "reference": "3602924888",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 12926169.05,
+        "code_donneur_dordre": "BEACCMCX",
+        "donneur_dordre": "BEAC, Services Centraux Yaoundé, DOF",
+        "beneficiaire": "BEAC, Services Centraux Yaoundé, DOF",
+        "pays_iso3": "CAM",
+        "commentaires": null,
+        "source_pdf": "voir message N°6 du fichier Citi euro.pdf"
+      }
+    ]
+  },
+  "SCB.pdf_incoming": {
+    "total": 3,
+    "normal": 3,
+    "beaccmcx091": 0,
+    "exc_323201": 0,
+    "other_exc": 0,
+    "types": {
+      "fin.910": 1,
+      "fin.202": 1,
+      "fin.900": 1
+    },
+    "sample_rows": [
+      {
+        "type_MT": "fin.910",
+        "reference": "260114165552",
+        "date_reference": "2026-01-14",
+        "devise": "USD",
+        "montant": 13044000.0,
+        "code_donneur_dordre": "ECOCTDND",
+        "donneur_dordre": "Ecobank Tchad",
+        "beneficiaire": "Ecobank Tchad",
+        "pays_iso3": "TCH",
+        "commentaires": null,
+        "source_pdf": "voir message N°2 du fichier SCB.pdf"
+      },
+      {
+        "type_MT": "fin.202",
+        "reference": "260114165552",
+        "date_reference": "2026-01-14",
+        "devise": "USD",
+        "montant": 13044000.0,
+        "code_donneur_dordre": "ECOCTDNDXXX",
+        "donneur_dordre": "Ecobank Tchad",
+        "beneficiaire": null,
+        "pays_iso3": "TCH",
+        "commentaires": "RAPATRIEMENT DEVISE TPC DU 09/",
+        "source_pdf": "voir message N°3 du fichier SCB.pdf"
+      },
+      {
+        "type_MT": "fin.900",
+        "reference": "260113161191",
+        "date_reference": "2026-01-14",
+        "devise": "USD",
+        "montant": 31024065.45,
+        "code_donneur_dordre": "BEACCMCX",
+        "donneur_dordre": "BEAC, Services Centraux Yaoundé, DOF",
+        "beneficiaire": null,
+        "pays_iso3": "CAM",
+        "commentaires": null,
+        "source_pdf": "voir message N°4 du fichier SCB.pdf"
+      }
+    ]
+  },
+  "report-484.pdf_incoming": {
+    "total": 227,
+    "normal": 217,
+    "beaccmcx091": 4,
+    "exc_323201": 0,
+    "other_exc": 6,
+    "types": {
+      "fin.202": 70,
+      "fin.900": 115,
+      "fin.910": 26,
+      "fin.103": 16
+    },
+    "sample_rows": [
+      {
+        "type_MT": "fin.202",
+        "reference": "AOPVI26014031107",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 1310.41,
+        "code_donneur_dordre": "LREGCMCXXXX",
+        "donneur_dordre": "LA REGIONALE BANK",
+        "beneficiaire": null,
+        "pays_iso3": "CAM",
+        "commentaires": "BGFIFRPP",
+        "source_pdf": "voir message N°129 du fichier report-484.pdf"
+      },
+      {
+        "type_MT": "fin.202",
+        "reference": "AOPVI26014031106",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 2407.0,
+        "code_donneur_dordre": "NAGCGQGQXXX",
+        "donneur_dordre": "BANCO NATIONALE GUINEA ECUATORIAL",
+        "beneficiaire": null,
+        "pays_iso3": "GEQ",
+        "commentaires": "NAGCGQGQXXX",
+        "source_pdf": "voir message N°130 du fichier report-484.pdf"
+      },
+      {
+        "type_MT": "fin.202",
+        "reference": "AOPVI26014031104",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 3174.0,
+        "code_donneur_dordre": "NAGCGQGQXXX",
+        "donneur_dordre": "BANCO NATIONALE GUINEA ECUATORIAL",
+        "beneficiaire": null,
+        "pays_iso3": "GEQ",
+        "commentaires": "NAGCGQGQXXX",
+        "source_pdf": "voir message N°131 du fichier report-484.pdf"
+      },
+      {
+        "type_MT": "fin.910",
+        "reference": "AOPVI26014023019",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 1000000.0,
+        "code_donneur_dordre": "BEACCMCX",
+        "donneur_dordre": "BEAC, Services Centraux Yaoundé, DOF",
+        "beneficiaire": "BEAC, Services Centraux Yaoundé, DOF",
+        "pays_iso3": "CAM",
+        "commentaires": null,
+        "source_pdf": "voir message N°184 du fichier report-484.pdf"
+      },
+      {
+        "type_MT": "fin.910",
+        "reference": "AOPVI26014023012",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 172200.0,
+        "code_donneur_dordre": "BEACCMCX",
+        "donneur_dordre": "BEAC, Services Centraux Yaoundé, DOF",
+        "beneficiaire": "BEAC, Services Centraux Yaoundé, DOF",
+        "pays_iso3": "CAM",
+        "commentaires": null,
+        "source_pdf": "voir message N°185 du fichier report-484.pdf"
+      },
+      {
+        "type_MT": "fin.910",
+        "reference": "AOPVI26013012699",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 34925722.22,
+        "code_donneur_dordre": "BEACCMCX",
+        "donneur_dordre": "BEAC, Services Centraux Yaoundé, DOF",
+        "beneficiaire": "BEAC, Services Centraux Yaoundé, DOF",
+        "pays_iso3": "CAM",
+        "commentaires": null,
+        "source_pdf": "voir message N°204 du fichier report-484.pdf"
+      },
+      {
+        "type_MT": "fin.910",
+        "reference": "T2PI260140043926",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 2998.35,
+        "code_donneur_dordre": "BDFEFRPPCCT",
+        "donneur_dordre": "BDFEFRPPCCT",
+        "beneficiaire": "BDFEFRPPCCT",
+        "pays_iso3": null,
+        "commentaires": "intérêts",
+        "source_pdf": "voir message N°254 du fichier report-484.pdf"
+      },
+      {
+        "type_MT": "fin.910",
+        "reference": "T2RM260140047031",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 49451.88,
+        "code_donneur_dordre": "BDFEFRPPCCT",
+        "donneur_dordre": "BDFEFRPPCCT",
+        "beneficiaire": "BDFEFRPPCCT",
+        "pays_iso3": null,
+        "commentaires": "remboursement",
+        "source_pdf": "voir message N°255 du fichier report-484.pdf"
+      },
+      {
+        "type_MT": "fin.910",
+        "reference": "T2PI260140043927",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 2.7,
+        "code_donneur_dordre": "BDFEFRPPCCT",
+        "donneur_dordre": "BDFEFRPPCCT",
+        "beneficiaire": "BDFEFRPPCCT",
+        "pays_iso3": null,
+        "commentaires": "intérêts",
+        "source_pdf": "voir message N°256 du fichier report-484.pdf"
+      }
+    ]
+  },
+  "MT103.pdf_incoming": {
+    "total": 32,
+    "normal": 32,
+    "beaccmcx091": 0,
+    "exc_323201": 0,
+    "other_exc": 0,
+    "types": {
+      "fin.103": 32
+    },
+    "sample_rows": [
+      {
+        "type_MT": "fin.103",
+        "reference": "9901/002/DRH/26",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 3880.0,
+        "code_donneur_dordre": "MONSEIGNEUR",
+        "donneur_dordre": "Client donneur d'ordre - Identifiant de partie - N",
+        "beneficiaire": null,
+        "pays_iso3": null,
+        "commentaires": "INV 04685DD27122025",
+        "source_pdf": "voir message N°1 du fichier MT103.pdf"
+      },
+      {
+        "type_MT": "fin.103",
+        "reference": "9901/767/DRH/25",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 12641.5,
+        "code_donneur_dordre": "SERVICES",
+        "donneur_dordre": "Client donneur d'ordre - Identifiant de partie - N",
+        "beneficiaire": null,
+        "pays_iso3": null,
+        "commentaires": "INV TSL2025000000080DD04122025 RGLT FRAIS D'HOSPITALISATION ABAKAR ADAM ABAKAR",
+        "source_pdf": "voir message N°2 du fichier MT103.pdf"
+      },
+      {
+        "type_MT": "fin.103",
+        "reference": "9910/184/9201/26",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 19230295.0,
+        "code_donneur_dordre": "AFREXIMBANK",
+        "donneur_dordre": "Client donneur d'ordre - Identifiant de partie - N",
+        "beneficiaire": null,
+        "pays_iso3": null,
+        "commentaires": "RFB PAIEMENT DES COUPONS PAR LE GOUVERNEMENT DU TCHAD LIES A L AC QUISITION DES 10000 BTA ET 40000 OTA EN FAVEUR D AFREXIMBANK",
+        "source_pdf": "voir message N°3 du fichier MT103.pdf"
+      }
+    ]
+  },
+  "MT103.pdf_outgoing": {
+    "total": 32,
+    "normal": 32,
+    "beaccmcx091": 0,
+    "exc_323201": 0,
+    "other_exc": 0,
+    "types": {
+      "fin.103": 32
+    },
+    "sample_rows": [
+      {
+        "type_MT": "fin.103",
+        "reference": "9901/002/DRH/26",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 3880.0,
+        "code_donneur_dordre": "MONSEIGNEUR",
+        "donneur_dordre": "Client donneur d'ordre - Identifiant de partie - N",
+        "beneficiaire": null,
+        "pays_iso3": null,
+        "commentaires": null,
+        "source_pdf": "voir message N°1 du fichier MT103.pdf"
+      },
+      {
+        "type_MT": "fin.103",
+        "reference": "9901/767/DRH/25",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 12641.5,
+        "code_donneur_dordre": "BEACCMCX090",
+        "donneur_dordre": "BEAC, Services Centraux Yaoundé",
+        "beneficiaire": null,
+        "pays_iso3": "CAM",
+        "commentaires": null,
+        "source_pdf": "voir message N°2 du fichier MT103.pdf"
+      },
+      {
+        "type_MT": "fin.103",
+        "reference": "9910/184/9201/26",
+        "date_reference": "2026-01-14",
+        "devise": "EUR",
+        "montant": 19230295.0,
+        "code_donneur_dordre": "AFREXIMBANK",
+        "donneur_dordre": "Client donneur d'ordre - Identifiant de partie - N",
+        "beneficiaire": null,
+        "pays_iso3": null,
+        "commentaires": null,
+        "source_pdf": "voir message N°3 du fichier MT103.pdf"
+      }
+    ]
+  }
+}
