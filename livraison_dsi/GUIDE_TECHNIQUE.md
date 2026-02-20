@@ -1,7 +1,7 @@
 # Guide Technique — PDF SWIFT Extractor
 
 **Version** : 3.0  
-**Date** : 20 juin 2025  
+**Date** : 20 février 2026  
 **Destinataires** : Direction des Systèmes d'Information (DSI)  
 **Classification** : Document interne — Usage technique
 
@@ -684,4 +684,4 @@ Utilisateur        app.py        extractor_manager    mt_multi
 
 ---
 
-*Document généré le 20 juin 2025 — PDF SWIFT Extractor v3.0*
+*Document généré le 20 février 2026 — PDF SWIFT Extractor v3.0*

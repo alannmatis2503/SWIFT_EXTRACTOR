@@ -1,7 +1,7 @@
 # Guide Utilisateur — PDF SWIFT Extractor
 
 **Version** : 3.0  
-**Date** : 20 juin 2025  
+**Date** : 20 février 2026  
 **Destinataires** : Utilisateurs finaux (Back-Office, Opérations)
 
 ---
@@ -241,4 +241,4 @@ Oui. L'application peut traiter des fichiers PDF de plusieurs centaines de pages
 
 ---
 
-*Document généré le 20 juin 2025 — PDF SWIFT Extractor v3.0*
+*Document généré le 20 février 2026 — PDF SWIFT Extractor v3.0*
