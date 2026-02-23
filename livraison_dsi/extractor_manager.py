@@ -356,7 +356,7 @@ def detect_message_type(text: str) -> Optional[str]:
     return None
 
 
-def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[Dict], List[Dict], List[Dict], List[Dict], List[Dict], Dict[str, set]]:
+def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[Dict], List[Dict], List[Dict], List[Dict], List[Dict], List[Dict], Dict[str, set]]:
     """
     Dispatcher intelligent :
       - si le PDF contient plusieurs messages -> utilise mt_multi.extract_messages_from_pdf
@@ -400,56 +400,62 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
             if blocks and len(blocks) > 1:
                 logger.info("%s: detected %d messages (using mt_multi).", p.name, len(blocks))
                 # Pass preloaded_text to avoid re-reading the PDF
-                rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction, preloaded_text=text)
+                rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction, preloaded_text=text)
                 # ensure backward compatibility: set institution_name from donneur_dordre if missing
                 for r in rows:
                     if "institution_name" not in r or not r.get("institution_name"):
                         r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
-                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
+                    for k in ["date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
                         if k not in r:
                             r[k] = None
                 # apply same compatibility to BEACCMCX091 rows
                 for r in beaccmcx091_rows:
                     if "institution_name" not in r or not r.get("institution_name"):
                         r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
-                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
+                    for k in ["date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
                         if k not in r:
                             r[k] = None
                 # apply same compatibility to exception_323201 rows
                 for r in exception_323201_rows:
                     if "institution_name" not in r or not r.get("institution_name"):
                         r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
-                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
+                    for k in ["date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
                         if k not in r:
                             r[k] = None
                 # apply same compatibility to other_exceptions rows
                 for r in other_exceptions_rows:
                     if "institution_name" not in r or not r.get("institution_name"):
                         r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
-                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
+                    for k in ["date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
                         if k not in r:
                             r[k] = None
                 # apply same compatibility to banque_de_france rows
                 for r in banque_de_france_rows:
                     if "institution_name" not in r or not r.get("institution_name"):
                         r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
-                    for k in ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
+                    for k in ["date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
                         if k not in r:
                             r[k] = None
-                return rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, missing_codes
+                # apply same compatibility to forex rows
+                for r in forex_rows:
+                    if "institution_name" not in r or not r.get("institution_name"):
+                        r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
+                    for k in ["date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
+                        if k not in r:
+                            r[k] = None
+                return rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, missing_codes
         except Exception as e:
             logger.exception("extract_dispatch: mt_multi detection/extraction failed for %s: %s", p.name, e)
             # fall through to single extractor
 
     # fallback: treat as single message
     single_row = extract_single(p, direction=direction)
-    return [single_row], beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, missing_codes
+    return [single_row], beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, [], missing_codes
 
 
 def _ensure_minimal_row(p: Path, mt_type: Optional[str] = None) -> Dict:
     """Return a minimal row template used when extraction not performed or failed."""
     return {
-        "code_banque": None,
         "date_reference": None,
         "reference": None,
         "type_MT": f"fin.{mt_type}" if mt_type else None,
@@ -521,7 +527,7 @@ def extract_single(pdf_path: Path, direction: str = "incoming") -> Dict:
             logger.error("%s: extractor returned non-dict result: %r", p.name, row)
             row = _ensure_minimal_row(p, mt_type=mt)
         else:
-            required = ["code_banque", "date_reference", "reference", "type_MT", "pays_iso3",
+            required = ["date_reference", "reference", "type_MT", "pays_iso3",
                         "institution_name", "beneficiaire", "montant", "devise", "source_pdf"]
             for k in required:
                 if k not in row:
@@ -554,7 +560,7 @@ def _sanitize_sheet_title(name: str, max_len: int = 31) -> str:
     return sanitized
 
 
-def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None, other_exceptions_rows: Optional[List[Dict]] = None, banque_de_france_rows: Optional[List[Dict]] = None, date_start: str = None, date_end: str = None) -> Path:
+def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None, other_exceptions_rows: Optional[List[Dict]] = None, banque_de_france_rows: Optional[List[Dict]] = None, forex_rows: Optional[List[Dict]] = None, date_start: str = None, date_end: str = None) -> Path:
     """
     Create an Excel workbook with:
       - a 'summary' sheet containing one row per extracted file (display headers in French)
@@ -562,6 +568,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
       - a 'Exceptions_323201' sheet if exception_323201_rows is provided
       - a 'Autres_Exceptions' sheet for EUR/nivellement exceptions
       - a 'BANQUE DE FRANCE' sheet for MT103 USD with BDF patterns
+      - a 'forex' sheet for MT910 incoming with forex donor codes
       - a 'Doublons_potentiels' sheet for potential duplicates (910 vs 202 with same ref+amount)
       - per-country summary sheets
       - one additional sheet per file with key/value pairs (debug-friendly)
@@ -575,6 +582,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         exception_323201_rows: Optional list of 323201 exception messages
         other_exceptions_rows: Optional list of other exceptions (EUR/nivellement)
         banque_de_france_rows: Optional list of MT103 USD BANQUE DE FRANCE messages
+        forex_rows: Optional list of MT910 incoming forex messages
         date_start: Optional start date for filtering (YYYY-MM-DD)
         date_end: Optional end date for filtering (YYYY-MM-DD)
     """
@@ -599,7 +607,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
 
     # summary headers (user-facing) - avec nouvelles colonnes
     display_headers = [
-        "code_banque",
+        "correspondant",
         "date_reference",
         "reference",
         "reference_origine",
@@ -608,7 +616,6 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         "Code du donneur d'ordre",
         "donneur d'ordre",
         "Bénéficiaire",
-        "correspondant",
         "montant",
         "devise",
         "commentaires",
@@ -649,7 +656,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         source_pdf = r.get("source_pdf") or ""
         
         row_data = [
-            r.get("code_banque"),
+            correspondant,
             date_ref,
             r.get("reference"),
             reference_origine,
@@ -658,7 +665,6 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
             code_donneur,
             donneur,
             beneficiaire,
-            correspondant,
             r.get("montant"),
             r.get("devise"),
             commentaires,
@@ -672,12 +678,12 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         if date_ref and isinstance(date_ref, datetime):
             sheet.cell(row=current_row, column=2).number_format = 'DD/MM/YYYY'
         
-        # Ajouter un lien hypertexte vers la feuille détaillée du message (colonne N = 14)
+        # Ajouter un lien hypertexte vers la feuille détaillée du message (colonne M = 13)
         if hyperlink_sheet_name and source_pdf:
             try:
                 # Échapper le nom de la feuille pour gérer les caractères spéciaux
                 escaped_sheet_name = hyperlink_sheet_name.replace("'", "''")
-                cell = sheet.cell(row=current_row, column=14)
+                cell = sheet.cell(row=current_row, column=13)
                 cell.hyperlink = f"#'{escaped_sheet_name}'!A1"
                 cell.style = "Hyperlink"
             except Exception:
@@ -885,7 +891,38 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         except Exception:
             pass
     
-    # ÉTAPE 5: Créer la feuille Doublons_potentiels (contient TOUS les doublons détectés)
+    # ÉTAPE 5: Créer la feuille forex (MT910 entrants avec code donneur dans la feuille forex)
+    if forex_rows is None:
+        forex_rows = []
+    if forex_rows:
+        sheet_index = 1
+        if beaccmcx091_rows:
+            sheet_index += 1
+        if exception_323201_rows:
+            sheet_index += 1
+        if other_exceptions_rows:
+            sheet_index += 1
+        if banque_de_france_rows:
+            sheet_index += 1
+        
+        forex_sheet = wb.create_sheet(title="forex", index=sheet_index)
+        forex_sheet.append(display_headers)
+        
+        for r in forex_rows:
+            _write_row_to_sheet(forex_sheet, r)
+        
+        # Adjust column widths
+        try:
+            for col_idx in range(1, len(display_headers) + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in forex_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10
+                )
+                forex_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+    
+    # ÉTAPE 6: Créer la feuille Doublons_potentiels (contient TOUS les doublons détectés)
     if potential_duplicates:
         sheet_index = 1
         if beaccmcx091_rows:
@@ -895,6 +932,8 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         if other_exceptions_rows:
             sheet_index += 1
         if banque_de_france_rows:
+            sheet_index += 1
+        if forex_rows:
             sheet_index += 1
         
         dup_sheet = wb.create_sheet(title="Doublons_potentiels", index=sheet_index)
@@ -932,8 +971,8 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     for country_code in sorted(countries.keys()):
         try:
             country_rows = countries[country_code]
-            # Trier par code_banque (puis donneur_dordre) pour regrouper par banque
-            country_rows.sort(key=lambda r: (str(r.get("code_banque") or "").upper(), str(r.get("donneur_dordre") or "").upper()))
+            # Trier par correspondant (puis donneur_dordre) pour regrouper
+            country_rows.sort(key=lambda r: (str(r.get("correspondant") or "").upper(), str(r.get("donneur_dordre") or "").upper()))
             # Renommer la feuille BEAC en "Operations_BEAC" pour plus de clarté
             sheet_title = "Operations_BEAC" if country_code == "BEAC" else country_code
             country_sheet = wb.create_sheet(title=sheet_title)
@@ -991,9 +1030,9 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         ws.append([])  # Ligne vide de séparation
 
         ordered_keys = [
-            "code_banque", "date_reference", "reference", "reference_origine", "type_MT", "pays_iso3",
+            "correspondant", "date_reference", "reference", "reference_origine", "type_MT", "pays_iso3",
             "code_donneur_dordre", "donneur_dordre", "institution_name", "beneficiaire", 
-            "correspondant", "montant", "devise", "commentaires", "source_pdf"
+            "montant", "devise", "commentaires", "source_pdf"
         ]
         written = set()
         for k in ordered_keys:
@@ -1485,4 +1524,251 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
     wb.save(out_path)
     logger.info("Transfer analysis workbook created: %s (matched: %d, unmatched_mt900: %d, suspens: %d, exceptions: %d)", 
                 out_path, len(matched_rows), len(unmatched_mt900_rows), len(suspens_rows), len(exception_rows))
+    return out_path
+
+
+# ================================================================
+# MODE 4 : Rapprochement MT950
+# ================================================================
+
+def create_mt950_reconciliation_workbook(
+    rapproches: List[Dict],
+    non_rapproches_messages: List[Dict],
+    non_rapproches_f61: List[Dict],
+    out_dir: Path,
+    sub_mode: str = "entrants",
+    date_start: str = None,
+    date_end: str = None,
+) -> Path:
+    """
+    Créer un workbook Excel pour le rapprochement MT950.
+
+    Sheets :
+    1. Rapproches          – F61 matchés côte-à-côte avec le message
+    2. Msg_non_rapproches  – Messages sans correspondance F61
+    3. F61_non_rapproches  – Écritures F61 sans correspondance message
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    date_suffix = ""
+    if date_start and date_end:
+        date_suffix = f"_{date_start}_to_{date_end}"
+    elif date_start:
+        date_suffix = f"_from_{date_start}"
+    elif date_end:
+        date_suffix = f"_to_{date_end}"
+
+    out_path = out_dir / f"rapprochement_mt950_{sub_mode}{date_suffix}_{ts}.xlsx"
+
+    wb = Workbook()
+
+    def _convert_date_to_excel(date_str):
+        if not date_str:
+            return None
+        try:
+            if isinstance(date_str, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                return datetime.strptime(date_str, '%Y-%m-%d')
+            return date_str
+        except Exception:
+            return date_str
+
+    def _adjust_widths(sheet, num_cols):
+        try:
+            for col_idx in range(1, num_cols + 1):
+                vals = [cell.value for cell in sheet[get_column_letter(col_idx)] if cell.value is not None]
+                max_len = max((len(str(v)) for v in vals), default=10)
+                sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+
+    # ---- Sheet 1 : Rapproches ----
+    rap_sheet = wb.active
+    rap_sheet.title = "Rapproches"
+
+    rap_headers = [
+        # F61 traceback
+        "N° F61",
+        # MT950 side
+        "MT950 C/D",
+        "MT950 Réf. Propriétaire",
+        "MT950 Réf. Institution",
+        "MT950 Date Valeur",
+        "MT950 Détails",
+        # Message side
+        "Type MT",
+        "Référence",
+        "Date Référence",
+        "Montant",
+        "Devise",
+        "Code donneur d'ordre",
+        "Donneur d'ordre",
+        "Bénéficiaire",
+        "Pays ISO3",
+        "Correspondant",
+        "Commentaires",
+        "Source PDF",
+    ]
+    rap_sheet.append(rap_headers)
+
+    for r in rapproches:
+        vd_raw = r.get("mt950_value_date") or ""
+        # Format YYMMDD -> DD/MM/YYYY display
+        if len(vd_raw) == 6:
+            try:
+                vd_display = f"{vd_raw[4:6]}/{vd_raw[2:4]}/20{vd_raw[0:2]}"
+            except Exception:
+                vd_display = vd_raw
+        else:
+            vd_display = vd_raw
+
+        date_ref = _convert_date_to_excel(r.get("msg_date_reference"))
+
+        row_data = [
+            r.get("f61_index"),
+            r.get("mt950_cd"),
+            r.get("mt950_ref_owner"),
+            r.get("mt950_ref_serv"),
+            vd_display,
+            r.get("mt950_supplementary_details"),
+            r.get("msg_type_MT"),
+            r.get("msg_reference"),
+            date_ref,
+            r.get("msg_montant"),
+            r.get("msg_devise"),
+            r.get("msg_code_donneur_dordre"),
+            r.get("msg_donneur_dordre"),
+            r.get("msg_beneficiaire"),
+            r.get("msg_pays_iso3"),
+            r.get("msg_correspondant"),
+            r.get("msg_commentaires"),
+            r.get("msg_source_pdf"),
+        ]
+        rap_sheet.append(row_data)
+
+        current_row = rap_sheet.max_row
+        if date_ref and isinstance(date_ref, datetime):
+            rap_sheet.cell(row=current_row, column=9).number_format = 'DD/MM/YYYY'
+
+    _adjust_widths(rap_sheet, len(rap_headers))
+
+    # ---- Sheet 2 : Msg_non_rapproches ----
+    msg_nr_headers = [
+        "correspondant",
+        "date_reference",
+        "reference",
+        "reference_origine",
+        "type_MT",
+        "pays_iso3",
+        "Code du donneur d'ordre",
+        "donneur d'ordre",
+        "Bénéficiaire",
+        "montant",
+        "devise",
+        "commentaires",
+        "source_pdf",
+    ]
+
+    msg_nr_sheet = wb.create_sheet(title="Msg_non_rapproches")
+    msg_nr_sheet.append(msg_nr_headers)
+
+    for r in non_rapproches_messages:
+        date_ref = _convert_date_to_excel(r.get("date_reference"))
+        row_data = [
+            r.get("correspondant"),
+            date_ref,
+            r.get("reference"),
+            r.get("reference_origine"),
+            r.get("type_MT"),
+            r.get("pays_iso3"),
+            r.get("code_donneur_dordre"),
+            r.get("donneur_dordre") or r.get("institution_name"),
+            r.get("beneficiaire"),
+            r.get("montant"),
+            r.get("devise"),
+            r.get("commentaires"),
+            r.get("source_pdf"),
+        ]
+        msg_nr_sheet.append(row_data)
+        current_row = msg_nr_sheet.max_row
+        if date_ref and isinstance(date_ref, datetime):
+            msg_nr_sheet.cell(row=current_row, column=2).number_format = 'DD/MM/YYYY'
+
+    _adjust_widths(msg_nr_sheet, len(msg_nr_headers))
+
+    # ---- Sheet 3 : F61_non_rapproches ----
+    f61_nr_headers = [
+        "N° F61",
+        "C/D",
+        "Réf. Propriétaire",
+        "Réf. Institution",
+        "Code Id.",
+        "Montant",
+        "Date Valeur",
+        "Détails",
+    ]
+
+    f61_nr_sheet = wb.create_sheet(title="F61_non_rapproches")
+    f61_nr_sheet.append(f61_nr_headers)
+
+    for f in non_rapproches_f61:
+        vd_raw = f.get("value_date") or ""
+        if len(vd_raw) == 6:
+            try:
+                vd_display = f"{vd_raw[4:6]}/{vd_raw[2:4]}/20{vd_raw[0:2]}"
+            except Exception:
+                vd_display = vd_raw
+        else:
+            vd_display = vd_raw
+        row_data = [
+            f.get("f61_index"),
+            f.get("cd"),
+            f.get("ref_owner"),
+            f.get("ref_serv"),
+            f.get("identification_code"),
+            f.get("amount"),
+            vd_display,
+            f.get("supplementary_details"),
+        ]
+        f61_nr_sheet.append(row_data)
+
+    _adjust_widths(f61_nr_sheet, len(f61_nr_headers))
+
+    # ---- Hyperlinks dans les en-têtes source_pdf ----
+    # Rapproches: "Source PDF" header → lien vers Msg_non_rapproches
+    source_pdf_col = len(rap_headers)  # dernière colonne
+    rap_header_cell = rap_sheet.cell(row=1, column=source_pdf_col)
+    try:
+        rap_header_cell.hyperlink = "#Msg_non_rapproches!A1"
+        rap_header_cell.style = "Hyperlink"
+        rap_header_cell.value = "Source PDF ➡"
+    except Exception:
+        pass
+
+    # Msg_non_rapproches: "source_pdf" header → lien retour vers Rapproches
+    source_pdf_col_msg = len(msg_nr_headers)  # dernière colonne
+    msg_nr_header_cell = msg_nr_sheet.cell(row=1, column=source_pdf_col_msg)
+    try:
+        msg_nr_header_cell.hyperlink = "#Rapproches!A1"
+        msg_nr_header_cell.style = "Hyperlink"
+        msg_nr_header_cell.value = "⬅ Rapproches"
+    except Exception:
+        pass
+
+    # F61_non_rapproches: ajouter une colonne lien retour vers Rapproches
+    f61_link_col = len(f61_nr_headers) + 1
+    f61_link_cell = f61_nr_sheet.cell(row=1, column=f61_link_col)
+    try:
+        f61_link_cell.hyperlink = "#Rapproches!A1"
+        f61_link_cell.style = "Hyperlink"
+        f61_link_cell.value = "⬅ Rapproches"
+    except Exception:
+        pass
+
+    wb.save(out_path)
+    logger.info(
+        "MT950 reconciliation workbook created: %s (rapproches: %d, msg_nr: %d, f61_nr: %d)",
+        out_path, len(rapproches), len(non_rapproches_messages), len(non_rapproches_f61),
+    )
     return out_path

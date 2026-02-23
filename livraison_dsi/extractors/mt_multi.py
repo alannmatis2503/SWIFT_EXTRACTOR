@@ -34,7 +34,7 @@ except Exception:
 # optional bic mapping utilities (used only for 202/103 postprocessing)
 try:
     from extractors import bic_utils
-    from extractors.bic_utils import map_reglement_code, extract_4digit_code_from_f52d, extract_tresor_code_from_f50f, extract_ccf_4digit_code_from_f50f
+    from extractors.bic_utils import map_reglement_code, extract_4digit_code_from_f52d, extract_tresor_code_from_f50f, extract_ccf_4digit_code_from_f50f, load_forex_codes
     HAS_BIC_UTILS = True
 except Exception:
     bic_utils = None
@@ -42,6 +42,7 @@ except Exception:
     extract_4digit_code_from_f52d = None
     extract_tresor_code_from_f50f = None
     extract_ccf_4digit_code_from_f50f = None
+    load_forex_codes = None
     HAS_BIC_UTILS = False
 
 # Import MT103 specific functions
@@ -465,6 +466,35 @@ def _check_nivellement_exception(row: Dict, block_text: str, direction: str) -> 
     return None
 
 
+# IBAN salle des marchés (MT910 entrants)
+_SALLE_DES_MARCHES_IBAN = "FR7630001000640000005169558"
+
+
+def _check_salle_des_marches_exception(row: Dict, block_text: str, direction: str) -> Optional[str]:
+    """
+    Vérifier si un MT910 entrant doit être routé vers opérations_salle des marchés.
+    Règle: si FR7630001000640000005169558 est détecté dans le champ F25P.
+    
+    Cette règle est MINORITAIRE sur toutes les autres règles d'exception.
+    Elle ne s'applique que si aucune autre exception n'a été détectée.
+    
+    Returns:
+        "opération salle des marchés" si détecté, None sinon
+    """
+    if direction != "incoming":
+        return None
+    
+    mt_type = row.get("type_MT") or ""
+    if "910" not in mt_type:
+        return None
+    
+    f25p_block = get_field_block(block_text, 'F25P') or get_field_block(block_text, 'F25')
+    if f25p_block and _SALLE_DES_MARCHES_IBAN in f25p_block:
+        return "opération salle des marchés"
+    
+    return None
+
+
 def _should_reject_mt103(row: Dict) -> bool:
     """
     RÈGLE 3: Pour MT103 en USD, rejeter si F53A, F54A ou F57A contient:
@@ -787,7 +817,9 @@ def _postprocess_row_for_202_103(row: Dict, block_text: str, xlsx_path: Optional
                 # Mapper avec la colonne Reglement
                 reglement_info = map_reglement_code(code_4, xlsx_path=xlsx_path)
                 if reglement_info:
-                    code_name = f"{code_4}/{reglement_info.get('name', '')}"
+                    # Utiliser le code BIC correspondant au lieu du code trésor 4 chiffres
+                    bic_from_reglement = reglement_info.get('bic', code_4)
+                    code_name = f"{bic_from_reglement}/{reglement_info.get('name', '')}"
                     # Stocker aussi le pays si trouvé
                     if reglement_info.get('country') and not row.get('pays_iso3'):
                         row['pays_iso3'] = reglement_info['country']
@@ -955,7 +987,9 @@ def _extract_donneur_mt910_incoming(row: Dict, block_text: str, xlsx_path: Optio
             if code_4:
                 reglement_info = map_reglement_code(code_4, xlsx_path=xlsx_path)
                 if reglement_info:
-                    code_name = f"{code_4}/{reglement_info.get('name', '')}"
+                    # Utiliser le code BIC correspondant au lieu du code trésor 4 chiffres
+                    bic_from_reglement = reglement_info.get('bic', code_4)
+                    code_name = f"{bic_from_reglement}/{reglement_info.get('name', '')}"
                     if reglement_info.get('country') and not row.get('pays_iso3'):
                         row['pays_iso3'] = reglement_info['country']
                 else:
@@ -1021,6 +1055,7 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
     Returns:
         tuple: (list of extracted rows, list of BEACCMCX091 rows, list of 323201 exception rows, 
                 list of other exceptions (EUR/nivellement), list of BANQUE DE FRANCE rows,
+                list of forex rows (MT910 entrants dont le donneur est dans la feuille forex),
                 dict with 'unmapped' and 'empty' code sets)
     """
     pdf_path = Path(pdf_path)
@@ -1034,6 +1069,14 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
         except Exception as e:
             logger.debug("mt_multi: bic mapping preload failed: %s", e)
 
+    # Charger les codes forex pour classification MT910 entrants
+    forex_codes = set()
+    if HAS_BIC_UTILS and load_forex_codes:
+        try:
+            forex_codes = load_forex_codes(bic_xlsx)
+        except Exception as e:
+            logger.debug("mt_multi: forex codes load failed: %s", e)
+
     # Use preloaded text if available, otherwise extract from PDF
     text = preloaded_text if preloaded_text else _safe_text_extract(pdf_path)
     blocks = _split_messages(text)
@@ -1043,6 +1086,7 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
     exception_323201_rows: List[Dict] = []  # Messages 202 entrants avec 323201 dans F58A
     other_exceptions_rows: List[Dict] = []  # Autres exceptions (EUR T2PI/T2RM/T2PL, nivellement)
     banque_de_france_rows: List[Dict] = []  # MT103 USD avec BANQUE DE FRANCE / FW021083459
+    forex_rows: List[Dict] = []  # MT910 entrants dont le code donneur est dans la feuille forex
     missing_codes: Dict[str, set] = {
         "unmapped": set(),  # codes found but no name mapping
         "empty": set()      # no code found at all
@@ -1059,6 +1103,14 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
         else:
             source_label = pdf_path.name
         
+        # RÈGLE: Filtrer les messages NAK (sortants uniquement)
+        # Si "NAK" apparaît dans l'en-tête du message, on l'ignore
+        if direction == "outgoing":
+            header_zone = blk[:600]  # En-tête = début du bloc
+            if re.search(r'\bNAK\b', header_zone):
+                logger.debug("mt_multi: Message %s rejeté (NAK détecté dans l'en-tête, sortant)", source_label)
+                continue
+
         mt_type_token = _detect_mt_type(blk)  # e.g. '202', '202.COV', '910'
         row: Optional[Dict] = None
         
@@ -1142,8 +1194,8 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                             tresor_info = extract_tresor_code_from_f50f(f50f_block, xlsx_path=bic_xlsx)
                         
                         if tresor_info:
-                            # Code Trésor trouvé
-                            row["code_donneur_dordre"] = tresor_info["code"]
+                            # Code Trésor trouvé - utiliser le BIC correspondant
+                            row["code_donneur_dordre"] = tresor_info.get("bic") or tresor_info["code"]
                             row["donneur_dordre"] = tresor_info["name"]
                             if tresor_info.get("country") and not row.get("pays_iso3"):
                                 row["pays_iso3"] = tresor_info["country"]
@@ -1423,9 +1475,31 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
         elif is_beaccmcx091:
             beaccmcx091_rows.append(row)
         else:
-            rows.append(row)
+            # Vérifier si MT910 entrant avec code donneur dans la feuille forex
+            is_forex = False
+            if direction == "incoming" and forex_codes:
+                mt = row.get("type_MT") or ""
+                if "910" in mt:
+                    code_donneur = row.get("code_donneur_dordre") or ""
+                    code_donneur_8 = code_donneur.strip().upper()[:8] if code_donneur else ""
+                    if code_donneur_8 and code_donneur_8 in forex_codes:
+                        is_forex = True
+                        row["commentaires"] = (row.get("commentaires") or "") + " forex" if row.get("commentaires") else "forex"
+                        logger.debug("mt_multi: Message %s identifié comme forex (code %s)", source_label, code_donneur_8)
+            
+            if is_forex:
+                forex_rows.append(row)
+            else:
+                # Vérifier salle des marchés (règle MINORITAIRE - plus basse priorité)
+                salle_des_marches_comment = _check_salle_des_marches_exception(row, blk, direction)
+                if salle_des_marches_comment:
+                    row["commentaires"] = salle_des_marches_comment
+                    logger.debug("mt_multi: Message %s identifié comme salle des marchés", source_label)
+                    other_exceptions_rows.append(row)
+                else:
+                    rows.append(row)
 
-    return rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, missing_codes
+    return rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, missing_codes
 
 
 def extract_transfer_analysis(pdf_path: Path, bic_xlsx: Optional[str] = None) -> tuple[List[Dict], List[Dict], Dict[str, set]]:
