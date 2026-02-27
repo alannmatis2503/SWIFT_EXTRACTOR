@@ -481,9 +481,12 @@ Ces exceptions s'appliquent **uniquement si la devise est EUR**.
 |-----------|--------|
 | **Type** | `fin.910` |
 | **Direction** | `incoming` uniquement |
-| **Condition** | Les 8 premiers caractères du `code_donneur_dordre` figurent dans la liste des codes forex |
+| **Condition (règle 1)** | Les 8 premiers caractères du `code_donneur_dordre` figurent dans la liste des codes forex |
+| **Condition (règle 2)** | Si la règle 1 échoue ET que le correspondant commence par `CITIUS33` ET que la devise est `USD` : on cherche les codes forex dans le champ **F50A** du message |
 | **Source des codes forex** | Feuille `forex` de `bic_codes.xlsx` (colonne A, à partir de la ligne 2) |
 | **Action** | Commentaire `"forex"` + message routé vers `forex_rows` → onglet **forex** |
+
+> **Détail règle 2 (CITIUS33 + USD)** : La correspondance est faite par recherche de sous-chaîne — chaque code forex (8 caractères) est cherché dans le texte brut du champ F50A. Si un code est trouvé, le message est routé vers l'onglet forex. Le donneur d'ordre extrait de F52A est conservé tel quel.
 
 ### 10.9 Exception salle des marchés — IBAN (MT910 entrant)
 

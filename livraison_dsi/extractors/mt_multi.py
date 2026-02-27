@@ -1593,12 +1593,28 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
             if direction == "incoming" and forex_codes:
                 mt = row.get("type_MT") or ""
                 if "910" in mt:
+                    # Règle 1 : code_donneur_dordre (8 premiers chars) dans la liste forex
                     code_donneur = row.get("code_donneur_dordre") or ""
                     code_donneur_8 = code_donneur.strip().upper()[:8] if code_donneur else ""
                     if code_donneur_8 and code_donneur_8 in forex_codes:
                         is_forex = True
                         row["commentaires"] = (row.get("commentaires") or "") + " forex" if row.get("commentaires") else "forex"
-                        logger.debug("mt_multi: Message %s identifié comme forex (code %s)", source_label, code_donneur_8)
+                        logger.debug("mt_multi: Message %s identifié comme forex (code donneur %s)", source_label, code_donneur_8)
+
+                    # Règle 2 (CITIUS33 + USD) : chercher un code forex dans F50A
+                    if not is_forex:
+                        corr = (row.get("correspondant") or "").upper()
+                        devise = (row.get("devise") or "").upper()
+                        if corr.startswith("CITIUS33") and devise == "USD":
+                            f50a_block = get_field_block(blk, 'F50A')
+                            if f50a_block:
+                                f50a_upper = f50a_block.upper()
+                                for fx_code in forex_codes:
+                                    if fx_code in f50a_upper:
+                                        is_forex = True
+                                        row["commentaires"] = (row.get("commentaires") or "") + " forex" if row.get("commentaires") else "forex"
+                                        logger.debug("mt_multi: Message %s identifié comme forex via F50A (code %s, correspondant CITIUS33, USD)", source_label, fx_code)
+                                        break
             
             if is_forex:
                 forex_rows.append(row)
