@@ -596,6 +596,30 @@ Même logique que le MT202 (F52A → F52D), avec une spécificité importante :
 - `beneficiaire` est **toujours identique** à `donneur_dordre` pour les MT910
 - Le pays (`pays_iso3`) est **forcé** via `_fill_country_from_code_force()` (override du pays détecté par heuristique textuelle, car celle-ci produit des faux positifs pour les MT910)
 
+### Règle spéciale CITIUS33 — Fallback F58A (MT202 et MT910 entrants)
+
+Lorsque le correspondant (sender BIC) d'un message **entrant** commence par `CITIUS33` (Citibank USA), un mécanisme de fallback supplémentaire est activé :
+
+| Condition | Description |
+|-----------|-------------|
+| **Type** | `fin.202` ou `fin.910` |
+| **Direction** | `incoming` uniquement |
+| **Correspondant** | Doit commencer par `CITIUS33` (8 premiers caractères) |
+| **Déclenchement** | Le code BIC extrait de F52A **n'est pas** trouvé dans `bic_codes.xlsx` |
+
+**Logique du fallback F58A/F58D** (par priorité) :
+
+| Priorité | Source | Méthode |
+|:--------:|--------|---------|
+| 1 | F58A/F58D | Code sous-participant à 4 chiffres (après `PartyIdentifier:`) → colonne `Reglement` de `bic_codes.xlsx` |
+| 2 | F58A/F58D | Code BIC standard → recherche dans `bic_codes.xlsx` |
+| 3 | F58A/F58D | Code CCF à 4 chiffres → colonne `CCF` de `bic_codes.xlsx` |
+
+Si un mapping est trouvé via ce fallback, il **remplace** le donneur d'ordre extrait de F52A.  
+Pour les MT910, le bénéficiaire est également mis à jour (bénéficiaire = donneur d'ordre).
+
+> **Explication métier** : Citibank USA agit comme banque correspondante. Le champ F52A peut contenir le BIC d'une banque locale qui n'est pas dans notre référentiel. Dans ce cas, F58A contient le code de la sous-participation (compte de règlement) ou un code CCF qui permet d'identifier le vrai donneur d'ordre.
+
 ### Filtrage des faux BIC
 
 Les chaînes suivantes sont exclues de la détection BIC (faux positifs courants) : `CAMEROON`, `GABON`, `FRANCE`, `CENTRAL`, `INTERNATIONAL`, `COMMERCIAL`, `NATIONAL`, etc. Elles respectent la syntaxe d'un code BIC (8–11 lettres majuscules) mais n'en sont pas.

@@ -391,6 +391,111 @@ def _check_f58a_323201(block_text: str) -> bool:
     return False
 
 
+def _citius33_f58a_fallback(row: Dict, block_text: str, xlsx_path: Optional[str] = None) -> Dict:
+    """
+    Règle CITIUS33 : pour les MT910 et MT202 entrants dont le correspondant (sender_bic)
+    commence par CITIUS33, si le code donneur d'ordre extrait de F52A n'est pas mappé
+    dans bic_codes.xlsx, on tente un fallback sur F58A.
+
+    Dans F58A, on cherche :
+      1. Un code sous-participant à 4 chiffres → résolution via colonne Reglement
+      2. Un code BIC standard → résolution via map_code_to_name
+      3. Un code CCF → résolution via _CCF_MAP
+
+    Si un mapping est trouvé, on remplace code_donneur_dordre / donneur_dordre.
+    Pour MT910, on met aussi à jour le bénéficiaire.
+    """
+    if not HAS_BIC_UTILS:
+        return row
+
+    code_current = row.get("code_donneur_dordre")
+
+    # Le fallback ne s'applique que si F52A a fourni un code NON mappé.
+    # Si aucun code n'a été trouvé du tout, on ne tente pas F58A.
+    if not code_current:
+        return row
+
+    # Vérifier que le code F52A actuel n'est PAS mappé dans bic_codes.xlsx
+    # (si déjà mappé, pas besoin de fallback)
+    name_from_mapping = bic_utils.map_code_to_name(code_current, xlsx_path=xlsx_path)
+    if name_from_mapping:
+        # Code déjà résolu → pas de fallback nécessaire
+        return row
+
+    # Récupérer le bloc F58A
+    f58a_block = get_field_block(block_text, 'F58A')
+    f58d_block = get_field_block(block_text, 'F58D')
+    target_block = f58a_block or f58d_block
+
+    if not target_block:
+        return row
+
+    code_name = None
+    code_only = None
+
+    # 1. Chercher un code sous-participant à 4 chiffres dans F58A/F58D
+    if extract_4digit_code_from_f52d:
+        code_4 = extract_4digit_code_from_f52d(target_block)
+        if code_4:
+            reglement_info = map_reglement_code(code_4, xlsx_path=xlsx_path)
+            if reglement_info:
+                bic_from_reglement = reglement_info.get('bic', code_4)
+                code_name = f"{bic_from_reglement}/{reglement_info.get('name', '')}"
+                if reglement_info.get('country') and not row.get('pays_iso3'):
+                    row['pays_iso3'] = reglement_info['country']
+                logger.debug("mt_multi: CITIUS33 fallback F58A → code sous-participant %s → %s", code_4, code_name)
+
+    # 2. Chercher un code BIC dans F58A
+    if not code_name:
+        bic_result = bic_utils.get_donneur_from_f52(target_block, message_text=None, xlsx_path=xlsx_path)
+        if bic_result:
+            # Vérifier que le BIC est bien mappé
+            if '/' in str(bic_result):
+                code_name = bic_result
+                logger.debug("mt_multi: CITIUS33 fallback F58A → BIC mappé %s", code_name)
+
+    # 3. Chercher un code CCF dans F58A
+    if not code_name and hasattr(bic_utils, 'extract_ccf_4digit_code_from_f50f'):
+        ccf_result = bic_utils.extract_ccf_4digit_code_from_f50f(target_block, xlsx_path=xlsx_path)
+        if ccf_result:
+            bic_ccf = ccf_result.get('bic', '')
+            name_ccf = ccf_result.get('name', '')
+            if bic_ccf:
+                code_name = f"{bic_ccf}/{name_ccf}"
+            elif name_ccf:
+                code_name = name_ccf
+            if ccf_result.get('country') and not row.get('pays_iso3'):
+                row['pays_iso3'] = ccf_result['country']
+            logger.debug("mt_multi: CITIUS33 fallback F58A → CCF %s", code_name)
+
+    if not code_name:
+        return row
+
+    # Mettre à jour le donneur d'ordre
+    if '/' in str(code_name):
+        code_only, name_only = str(code_name).split('/', 1)
+    else:
+        code_only = str(code_name)
+        name_only = None
+
+    row["code_donneur_dordre"] = code_only
+    row["donneur_dordre"] = name_only if name_only else code_only
+    row["institution_name"] = name_only if name_only else code_only
+
+    if not row.get("code_banque"):
+        row["code_banque"] = code_only
+
+    # Pour MT910 : bénéficiaire = donneur d'ordre
+    mt_type_val = row.get("type_MT", "")
+    if mt_type_val and mt_type_val.startswith("fin.910"):
+        row["beneficiaire"] = row["donneur_dordre"]
+
+    # Remplir pays depuis le nouveau code BIC
+    row = _fill_country_from_code_force(row, xlsx_path=xlsx_path)
+
+    return row
+
+
 def _check_eur_exception(row: Dict, direction: str) -> Optional[str]:
     """
     Vérifier si le message doit être mis en exception pour devise EUR.
@@ -1439,6 +1544,14 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
             logger.debug("mt_multi: Message %s identifié comme exception nivellement", source_label)
             row["commentaires"] = nivellement_comment
             is_nivellement_exception = True
+
+        # RÈGLE CITIUS33: Pour MT910/MT202 entrants depuis CITIUS33,
+        # si F52A contient un BIC non mappé dans bic_codes.xlsx,
+        # fallback sur F58A pour chercher un code sous-participant ou CCF
+        if direction == "incoming" and sender_bic and sender_bic.upper().startswith("CITIUS33"):
+            mt_type_val = row.get("type_MT", "")
+            if mt_type_val and (mt_type_val.startswith("fin.910") or mt_type_val.startswith("fin.202")):
+                row = _citius33_f58a_fallback(row, blk, xlsx_path=bic_xlsx)
 
         # Post-traitement: remplir pays_iso3 depuis code_donneur_dordre si absent
         row = _fill_country_from_code(row, xlsx_path=bic_xlsx)
