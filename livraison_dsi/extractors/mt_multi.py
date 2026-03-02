@@ -1210,8 +1210,10 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
         
         # RÈGLE: Filtrer les messages NAK (sortants uniquement)
         # Si "NAK" apparaît dans l'en-tête du message, on l'ignore
+        # NB: fenêtre réduite à 30 chars pour éviter le faux positif
+        # du label "ACK/NAK Reception Date/Time" qui apparaît vers pos 550-600
         if direction == "outgoing":
-            header_zone = blk[:600]  # En-tête = début du bloc
+            header_zone = blk[:30]  # En-tête = tout début du bloc
             if re.search(r'\bNAK\b', header_zone):
                 logger.debug("mt_multi: Message %s rejeté (NAK détecté dans l'en-tête, sortant)", source_label)
                 continue
