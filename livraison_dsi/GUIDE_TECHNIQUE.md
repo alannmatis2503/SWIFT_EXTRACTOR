@@ -1,7 +1,7 @@
 # Guide Technique — PDF SWIFT Extractor
 
-**Version** : 4.0  
-**Date** : 23 février 2026  
+**Version** : 5.0  
+**Date** : 6 mars 2026  
 **Destinataires** : Direction des Systèmes d'Information (DSI)  
 **Classification** : Document interne — Usage technique
 
@@ -1193,4 +1193,4 @@ Format : `2026-02-23 14:30:05,123 [INFO] Message`
 
 ---
 
-*Document généré le 23 février 2026 — PDF SWIFT Extractor v4.0*
+*Document généré le 6 mars 2026 — PDF SWIFT Extractor v5.0*

@@ -1,7 +1,7 @@
 # Guide Utilisateur — PDF SWIFT Extractor
 
-**Version** : 3.0  
-**Date** : 20 février 2026  
+**Version** : 5.0  
+**Date** : 6 mars 2026  
 **Destinataires** : Utilisateurs finaux (Back-Office, Opérations)
 
 ---
@@ -146,6 +146,7 @@ Des onglets sont créés pour chaque pays rencontré (ex : **CMR**, **GAB**, **T
 | **Exceptions_323201** | Messages avec le code 323201 |
 | **Autres_Exceptions** | Nivellement, intérêts EUR, salle des marchés… |
 | **BANQUE DE FRANCE** | MT103 en USD passant par la Banque de France (FW021083459) |
+| **Exceptions_Correspondants** | MT202 sortants avec exceptions BdF correspondant (CITI/SCB) |
 | **Doublons_potentiels** | Messages potentiellement en double |
 
 ### Navigation dans Excel
@@ -241,4 +242,4 @@ Oui. L'application peut traiter des fichiers PDF de plusieurs centaines de pages
 
 ---
 
-*Document généré le 20 février 2026 — PDF SWIFT Extractor v3.0*
+*Document généré le 6 mars 2026 — PDF SWIFT Extractor v5.0*
