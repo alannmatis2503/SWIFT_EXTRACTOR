@@ -18,7 +18,7 @@ try:
     from extractor_manager import extract_single, create_workbook, extract_dispatch
     from extractors import bic_utils
     from extractors.mt950 import extract_mt950_entries, match_f61_with_messages
-    from extractor_manager import create_mt950_reconciliation_workbook
+    from extractor_manager import create_mt950_reconciliation_workbook, create_mt950_reconciliation_workbook_v2
 except Exception as e:
     st.error(f"Impossible d'importer l'extracteur backend: {e}")
     st.stop()
@@ -258,6 +258,7 @@ if run_button:
         other_exceptions_rows = []  # Liste pour les autres exceptions (EUR/nivellement)
         banque_de_france_rows = []  # MT103 USD avec BANQUE DE FRANCE / FW021083459
         forex_rows = []  # MT910 entrants avec code donneur forex
+        bdf_corr_exception_rows = []  # MT202 sortants exceptions correspondants BdF
         
         if direction == "transfer_analysis":
             # ======== MODE ANALYSE DES TRANSFERTS ========
@@ -306,7 +307,7 @@ if run_button:
                     
                     # Utiliser extract_dispatch avec direction="outgoing" pour bénéficier de toute la logique sortante
                     # (F58A bénéficiaire, codes Trésor/CCF, etc.)
-                    new_rows, new_beac_rows, new_exc_rows, new_other_exc_rows, new_bdf_rows, new_forex_rows, missing = extract_dispatch(tmp_path, direction="outgoing")
+                    new_rows, new_beac_rows, new_exc_rows, new_other_exc_rows, new_bdf_rows, new_forex_rows, new_bdf_corr_exc_rows, missing = extract_dispatch(tmp_path, direction="outgoing")
                     all_missing_codes["unmapped"].update(missing.get("unmapped", set()))
                     all_missing_codes["empty"].update(missing.get("empty", set()))
                     
@@ -338,7 +339,7 @@ if run_button:
             st.info(f"📊 **Résumé** : {len(matched_rows)} MT900 matchés, {len(unmatched_mt900_rows)} MT900 sans correspondant, {len(suspens_rows)} MT103/MT202 en suspens, {len(exception_mt900_rows)} MT900 en exception")
             
         elif direction == "mt950_reconciliation":
-            # ======== MODE RAPPROCHEMENT MT950 ========
+            # ======== MODE RAPPROCHEMENT MT950 (v2 — feuilles séparées par catégorie) ========
             total_files = len(uploaded_mt950_files) + len(uploaded_mt950_msg_files)
             progress = st.progress(0, text="Initialisation...")
             idx = 0
@@ -366,24 +367,60 @@ if run_button:
                     with st.expander(f"Détails de l'erreur pour {uf.name}"):
                         st.code(tb)
             
-            # Étape 2: Extraire les messages
-            all_msg_rows = []
+            # Étape 2: Extraire les messages NORMALEMENT (comme mode 1/2),
+            # en conservant les catégories séparées
+            all_summary_rows = []
+            all_beac_rows = []
+            all_exc_323201_rows = []
+            all_other_exc_rows = []
+            all_bdf_rows = []
+            all_forex_rows_mt950 = []
+            all_bdf_corr_exc_rows_mt950 = []
+            
             for uf in uploaded_mt950_msg_files:
                 idx += 1
                 progress.progress(idx / total_files, text=f"Messages : {uf.name} ({idx}/{total_files})")
                 try:
                     tmp_path = save_uploaded_to_temp(uf)
                     tmp_dirs.append(tmp_path.parent)
-                    new_rows, new_beac_rows, new_exc_rows, new_other_exc_rows, new_bdf_rows, new_forex_rows, missing = extract_dispatch(tmp_path, direction=msg_direction)
+                    new_rows, new_beac_rows, new_exc_rows, new_other_exc_rows, new_bdf_rows, new_forex_rows, new_bdf_corr_exc_rows, missing = extract_dispatch(tmp_path, direction=msg_direction)
                     all_missing_codes["unmapped"].update(missing.get("unmapped", set()))
                     all_missing_codes["empty"].update(missing.get("empty", set()))
                     
-                    # Filtrer: garder seulement MT202, MT103, MT910 (exclure MT900, MT950, MT210)
-                    # Combiner toutes les listes pour inclure les messages routés vers BEAC, forex, etc.
-                    combined = list(new_rows) + list(new_beac_rows) + list(new_exc_rows) + list(new_other_exc_rows) + list(new_bdf_rows) + list(new_forex_rows)
-                    filtered = [r for r in combined if r.get("type_MT") and any(t in r.get("type_MT") for t in ("202", "103", "910"))]
-                    all_msg_rows.extend(filtered)
-                    st.success(f"✅ {uf.name}: {len(filtered)} messages extraits (MT202/MT103/MT910)")
+                    # Normaliser chaque catégorie (source_pdf, donneur_dordre, beneficiaire)
+                    def _normalize_rows(row_list, pdf_name):
+                        for r in row_list:
+                            if "beneficiaire" not in r:
+                                r["beneficiaire"] = None
+                            if "donneur_dordre" not in r:
+                                r["donneur_dordre"] = r.get("institution_name") or None
+                            if not r.get("source_pdf"):
+                                r["source_pdf"] = pdf_name
+                            if not r.get("type_MT"):
+                                r["type_MT"] = None
+                    
+                    # Filtrer pour ne garder que MT202, MT103, MT910
+                    def _filter_valid(rlist):
+                        return [r for r in rlist if r.get("type_MT") and any(t in r.get("type_MT") for t in ("202", "103", "910"))]
+                    
+                    _normalize_rows(new_rows, uf.name)
+                    _normalize_rows(new_beac_rows, uf.name)
+                    _normalize_rows(new_exc_rows, uf.name)
+                    _normalize_rows(new_other_exc_rows, uf.name)
+                    _normalize_rows(new_bdf_rows, uf.name)
+                    _normalize_rows(new_forex_rows, uf.name)
+                    _normalize_rows(new_bdf_corr_exc_rows, uf.name)
+                    
+                    all_summary_rows.extend(_filter_valid(new_rows))
+                    all_beac_rows.extend(_filter_valid(new_beac_rows))
+                    all_exc_323201_rows.extend(_filter_valid(new_exc_rows))
+                    all_other_exc_rows.extend(_filter_valid(new_other_exc_rows))
+                    all_bdf_rows.extend(_filter_valid(new_bdf_rows))
+                    all_forex_rows_mt950.extend(_filter_valid(new_forex_rows))
+                    all_bdf_corr_exc_rows_mt950.extend(_filter_valid(new_bdf_corr_exc_rows))
+                    
+                    total_extracted = len(new_rows) + len(new_beac_rows) + len(new_exc_rows) + len(new_other_exc_rows) + len(new_bdf_rows) + len(new_forex_rows) + len(new_bdf_corr_exc_rows)
+                    st.success(f"✅ {uf.name}: {total_extracted} messages extraits")
                 except Exception as e:
                     tb = traceback.format_exc()
                     errors.append((uf.name, str(e)))
@@ -393,20 +430,79 @@ if run_button:
             
             progress.progress(1.0, text="Rapprochement en cours...")
             
-            # Étape 3: Rapprocher F61 avec messages
-            rapproches, non_rapproches_messages, non_rapproches_f61 = match_f61_with_messages(
-                all_f61_entries, all_msg_rows, sub_mode=mt950_sub_mode
+            # Étape 3: Rapprocher chaque catégorie séparément avec les F61
+            from extractors.mt950 import match_f61_with_messages as match_f61
+            
+            # Combiner TOUTES les catégories pour le matching global
+            # (un F61 peut matcher un msg de n'importe quelle catégorie)
+            categories = {
+                "summary": all_summary_rows,
+                "BEACCMCX091": all_beac_rows,
+                "Exceptions_323201": all_exc_323201_rows,
+                "Autres_Exceptions": all_other_exc_rows,
+                "BANQUE DE FRANCE": all_bdf_rows,
+                "forex": all_forex_rows_mt950,
+                "Exceptions_Correspondants": all_bdf_corr_exc_rows_mt950,
+            }
+            
+            # Pool de tous les messages pour le matching
+            all_msg_pool = []
+            msg_to_category = {}  # id(msg) -> category_name
+            for cat_name, cat_rows in categories.items():
+                for r in cat_rows:
+                    all_msg_pool.append(r)
+                    msg_to_category[id(r)] = cat_name
+            
+            # Matching global
+            rapproches_raw, non_rap_msg_raw, non_rap_f61 = match_f61(
+                all_f61_entries, all_msg_pool, sub_mode=mt950_sub_mode
             )
             
+            # Répartir les rapprochés par catégorie d'origine
+            rapproches_by_cat = {cat: [] for cat in categories}
+            for rap in rapproches_raw:
+                # Retrouver le message d'origine via la référence et le source_pdf
+                matched_msg_ref = rap.get("msg_reference")
+                matched_msg_src = rap.get("msg_source_pdf")
+                matched_msg_type = rap.get("msg_type_MT")
+                matched_msg_montant = rap.get("msg_montant")
+                
+                # Chercher dans le pool pour identifier la catégorie
+                found_cat = "summary"  # default
+                for msg in all_msg_pool:
+                    if (msg.get("reference") == matched_msg_ref and 
+                        msg.get("source_pdf") == matched_msg_src and
+                        msg.get("type_MT") == matched_msg_type and
+                        msg.get("montant") == matched_msg_montant):
+                        found_cat = msg_to_category.get(id(msg), "summary")
+                        break
+                rapproches_by_cat[found_cat].append(rap)
+            
+            # Répartir les non-rapprochés par catégorie d'origine
+            non_rap_msg_by_cat = {cat: [] for cat in categories}
+            for msg in non_rap_msg_raw:
+                cat = msg_to_category.get(id(msg), "summary")
+                non_rap_msg_by_cat[cat].append(msg)
+            
             # Stocker pour la génération du workbook
-            rows = rapproches  # utiliser rapproches comme "rows" principal pour le flow
-            st.session_state.mt950_rapproches = rapproches
-            st.session_state.mt950_non_rap_msg = non_rapproches_messages
-            st.session_state.mt950_non_rap_f61 = non_rapproches_f61
+            rows = rapproches_raw  # pour le flow de date-filtering et le check "if rows:"
+            st.session_state.mt950_rapproches_by_cat = rapproches_by_cat
+            st.session_state.mt950_non_rap_msg_by_cat = non_rap_msg_by_cat
+            st.session_state.mt950_non_rap_f61 = non_rap_f61
             st.session_state.mt950_sub_mode = mt950_sub_mode
+            st.session_state.mt950_categories = categories
             
             progress.empty()
-            st.info(f"📊 **Résumé** : {len(rapproches)} rapprochés, {len(non_rapproches_messages)} messages non rapprochés, {len(non_rapproches_f61)} F61 non rapprochés")
+            total_rap = sum(len(v) for v in rapproches_by_cat.values())
+            total_non_rap = sum(len(v) for v in non_rap_msg_by_cat.values())
+            st.info(f"📊 **Résumé** : {total_rap} rapprochés, {total_non_rap} messages non rapprochés, {len(non_rap_f61)} F61 non rapprochés")
+            
+            # Détail par catégorie
+            for cat_name in categories:
+                n_rap = len(rapproches_by_cat[cat_name])
+                n_non = len(non_rap_msg_by_cat[cat_name])
+                if n_rap > 0 or n_non > 0:
+                    st.caption(f"  📂 **{cat_name}** : {n_rap} rapprochés, {n_non} non rapprochés")
             
         else:
             # ======== MODE STANDARD (incoming/outgoing) ========
@@ -430,8 +526,8 @@ if run_button:
                 
                 try:
                     # Mode standard (incoming/outgoing)
-                    # extract_dispatch retourne (rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, missing_codes)
-                    new_rows, new_beac_rows, new_exc_rows, new_other_exc_rows, new_bdf_rows, new_forex_rows, missing_codes = extract_dispatch(tmp_path, direction=direction)
+                    # extract_dispatch retourne (rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, bdf_corr_exception_rows, missing_codes)
+                    new_rows, new_beac_rows, new_exc_rows, new_other_exc_rows, new_bdf_rows, new_forex_rows, new_bdf_corr_exc_rows, missing_codes = extract_dispatch(tmp_path, direction=direction)
                     
                     # Accumulate missing codes
                     all_missing_codes["unmapped"].update(missing_codes.get("unmapped", set()))
@@ -551,6 +647,25 @@ if run_button:
                         
                         forex_rows.append(r)
                     
+                    # Normalisations pour les exceptions correspondants BdF
+                    for r in new_bdf_corr_exc_rows:
+                        if "beneficiaire" not in r:
+                            r["beneficiaire"] = None
+                        
+                        if "donneur_dordre" not in r:
+                            if "institution_name" in r and r["institution_name"]:
+                                r["donneur_dordre"] = r.get("institution_name")
+                            else:
+                                r["donneur_dordre"] = None
+                        
+                        if not r.get("source_pdf"):
+                            r["source_pdf"] = uf.name
+                        
+                        if not r.get("type_MT"):
+                            r["type_MT"] = None
+                        
+                        bdf_corr_exception_rows.append(r)
+                    
                     types = sorted({rr.get("type_MT") or "inconnu" for rr in new_rows})
                     beac_msg = f" + {len(new_beac_rows)} BEACCMCX091" if new_beac_rows else ""
                     exc_msg = f" + {len(new_exc_rows)} exceptions 323201" if new_exc_rows else ""
@@ -620,22 +735,22 @@ if run_button:
                     # Afficher le résumé
                     st.info(f"📊 **Résumé** : {len(rows)} transfert(s) exécuté(s), {len(unmatched_mt900_rows)} MT900 non matchés, {len(suspens_rows)} en suspens, {len(exception_mt900_rows)} en exception")
                 elif direction == "mt950_reconciliation":
-                    # Mode rapprochement MT950
-                    rapproches_data = st.session_state.get('mt950_rapproches', [])
-                    non_rap_msg = st.session_state.get('mt950_non_rap_msg', [])
+                    # Mode rapprochement MT950 v2 — feuilles séparées par catégorie
+                    rapproches_by_cat = st.session_state.get('mt950_rapproches_by_cat', {})
+                    non_rap_msg_by_cat = st.session_state.get('mt950_non_rap_msg_by_cat', {})
                     non_rap_f61 = st.session_state.get('mt950_non_rap_f61', [])
                     sub_mode_val = st.session_state.get('mt950_sub_mode', 'entrants')
                     
                     date_start_str = date_debut.strftime("%Y-%m-%d") if date_debut else None
                     date_end_str = date_fin.strftime("%Y-%m-%d") if date_fin else None
                     
-                    out_path = create_mt950_reconciliation_workbook(
-                        rapproches_data, non_rap_msg, non_rap_f61, temp_outdir,
+                    out_path = create_mt950_reconciliation_workbook_v2(
+                        rapproches_by_cat, non_rap_msg_by_cat, non_rap_f61, temp_outdir,
                         sub_mode=sub_mode_val,
                         date_start=date_start_str, date_end=date_end_str,
                     )
                 else:
-                    out_path = create_workbook(rows, temp_outdir, direction=direction, beaccmcx091_rows=beaccmcx091_rows, exception_323201_rows=exception_323201_rows, other_exceptions_rows=other_exceptions_rows, banque_de_france_rows=banque_de_france_rows, forex_rows=forex_rows)
+                    out_path = create_workbook(rows, temp_outdir, direction=direction, beaccmcx091_rows=beaccmcx091_rows, exception_323201_rows=exception_323201_rows, other_exceptions_rows=other_exceptions_rows, banque_de_france_rows=banque_de_france_rows, forex_rows=forex_rows, bdf_corr_exception_rows=bdf_corr_exception_rows)
                 with open(out_path, "rb") as f:
                     excel_data = f.read()
                 

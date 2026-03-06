@@ -72,6 +72,9 @@ _SENDER_RE = re.compile(r'(?m)^Sender\s*:')
 _LABEL_SEARCH_RE = re.compile(r'(?i)(?:IdentifierCode|Identifier Code|Code d\'identifiant|Code d identifiant|Identifier code)\s*[:\-\s]*')
 _TOKEN_SEARCH_RE = re.compile(r'\b([A-Z0-9]{8,11})\b', re.I)
 
+# BdF (Banque de France) BIC codes for special handling
+BDF_BICS = frozenset(["BDFEFRPPCCT", "BDFEFRPPSRD"])
+
 # small helper to get F52A from a block (try to reuse mt202 helper if present)
 try:
     from extractors.mt202 import get_field_block
@@ -494,6 +497,118 @@ def _citius33_f58a_fallback(row: Dict, block_text: str, xlsx_path: Optional[str]
     row = _fill_country_from_code_force(row, xlsx_path=xlsx_path)
 
     return row
+
+
+def _bdf_f58a_fallback(row: Dict, block_text: str, xlsx_path: Optional[str] = None) -> Dict:
+    """
+    Règle BdF : pour les MT202 entrants dont le correspondant (sender_bic)
+    est BDFEFRPPCCT ou BDFEFRPPSRD, si le code donneur d'ordre extrait de F52A
+    n'est pas mappé dans bic_codes.xlsx, on tente un fallback sur F58A.
+
+    Dans F58A, on cherche :
+      1. Un code BIC strict → résolution via map_code_to_name (excluant faux BIC)
+      2. Un code sous-participant à 4 chiffres → résolution via colonne Reglement
+
+    Si un mapping est trouvé, on remplace code_donneur_dordre / donneur_dordre.
+    """
+    if not HAS_BIC_UTILS:
+        return row
+
+    code_current = row.get("code_donneur_dordre")
+
+    # Le fallback ne s'applique que si F52A a fourni un code NON mappé.
+    if not code_current:
+        return row
+
+    # Vérifier que le code F52A actuel n'est PAS mappé dans bic_codes.xlsx
+    name_from_mapping = bic_utils.map_code_to_name(code_current, xlsx_path=xlsx_path)
+    if name_from_mapping:
+        return row  # Déjà résolu, pas de fallback
+
+    # Récupérer le bloc F58A
+    f58a_block = get_field_block(block_text, 'F58A')
+    f58d_block = get_field_block(block_text, 'F58D')
+    target_block = f58a_block or f58d_block
+
+    if not target_block:
+        return row
+
+    code_name = None
+
+    # 1. Chercher un code BIC strict dans F58A (excluant faux BIC)
+    bic_result = bic_utils.get_donneur_from_f52(target_block, message_text=None, xlsx_path=xlsx_path)
+    if bic_result:
+        if '/' in str(bic_result):
+            code_name = bic_result
+            logger.debug("mt_multi: BdF fallback F58A → BIC mappé %s", code_name)
+
+    # 2. Chercher un code sous-participant à 4 chiffres dans F58A
+    if not code_name and extract_4digit_code_from_f52d:
+        code_4 = extract_4digit_code_from_f52d(target_block)
+        if code_4:
+            reglement_info = map_reglement_code(code_4, xlsx_path=xlsx_path)
+            if reglement_info:
+                bic_from_reglement = reglement_info.get('bic', code_4)
+                code_name = f"{bic_from_reglement}/{reglement_info.get('name', '')}"
+                if reglement_info.get('country') and not row.get('pays_iso3'):
+                    row['pays_iso3'] = reglement_info['country']
+                logger.debug("mt_multi: BdF fallback F58A → code sous-participant %s → %s", code_4, code_name)
+
+    if not code_name:
+        return row
+
+    # Mettre à jour le donneur d'ordre
+    if '/' in str(code_name):
+        code_only, name_only = str(code_name).split('/', 1)
+    else:
+        code_only = str(code_name)
+        name_only = None
+
+    row["code_donneur_dordre"] = code_only
+    row["donneur_dordre"] = name_only if name_only else code_only
+    row["institution_name"] = name_only if name_only else code_only
+
+    if not row.get("code_banque"):
+        row["code_banque"] = code_only
+
+    # Remplir pays depuis le nouveau code BIC
+    row = _fill_country_from_code_force(row, xlsx_path=xlsx_path)
+
+    return row
+
+
+def _check_mt202_outgoing_corr_exception(block_text: str, receiver_bic: str) -> Optional[str]:
+    """
+    Vérifier si un MT202 sortant doit être mis en exception correspondant.
+
+    Règles :
+    - CITIGB2LXXX : F57A contient BDFEFRPPCCT ou BDFEFRPPSRD
+    - SCBLGB2LXXX : F57A contient CITIUS33XXX ET F58A contient 36357124
+
+    Returns:
+        Le commentaire d'exception ou None si pas d'exception
+    """
+    if not receiver_bic:
+        return None
+
+    recv = receiver_bic.upper()
+
+    if recv == "CITIGB2LXXX":
+        f57a = get_field_block(block_text, 'F57A')
+        if f57a:
+            f57a_upper = f57a.upper()
+            for bdf_bic in BDF_BICS:
+                if bdf_bic in f57a_upper:
+                    return f"Banque de France ({bdf_bic}) dans F57A"
+
+    elif recv == "SCBLGB2LXXX":
+        f57a = get_field_block(block_text, 'F57A')
+        f58a = get_field_block(block_text, 'F58A')
+        if f57a and f58a:
+            if "CITIUS33" in f57a.upper() and "36357124" in f58a:
+                return "CITIUS33 dans F57A + 36357124 dans F58A"
+
+    return None
 
 
 def _check_eur_exception(row: Dict, direction: str) -> Optional[str]:
@@ -1192,6 +1307,7 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
     other_exceptions_rows: List[Dict] = []  # Autres exceptions (EUR T2PI/T2RM/T2PL, nivellement)
     banque_de_france_rows: List[Dict] = []  # MT103 USD avec BANQUE DE FRANCE / FW021083459
     forex_rows: List[Dict] = []  # MT910 entrants dont le code donneur est dans la feuille forex
+    bdf_corr_exception_rows: List[Dict] = []  # MT202 sortants avec exceptions BdF correspondant
     missing_codes: Dict[str, set] = {
         "unmapped": set(),  # codes found but no name mapping
         "empty": set()      # no code found at all
@@ -1249,6 +1365,18 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                     # Extract F58A for outgoing MT202
                     row = _extract_f58a_beneficiary(row, blk, xlsx_path=bic_xlsx)
 
+                    # MT202 sortants CITI/SCB: donneur d'ordre = bénéficiaire
+                    _recv_202 = _extract_receiver_bic(blk) or row.get("receiver_bic") or ""
+                    if _recv_202.upper() in ("SCBLGB2LXXX", "CITIGB2LXXX"):
+                        row["donneur_dordre"] = row.get("beneficiaire")
+                        row["institution_name"] = row.get("beneficiaire")
+                        # Extraire le code BIC du bénéficiaire depuis F58A pour code_donneur_dordre
+                        _f58a = get_field_block(blk, 'F58A')
+                        if _f58a:
+                            _m_bic = re.search(r'\b([A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?)\b', _f58a)
+                            if _m_bic and _m_bic.group(1).upper() not in _FALSE_BIC_WORDS:
+                                row["code_donneur_dordre"] = _m_bic.group(1).upper()
+
                 # if variant .COV present, force type_MT accordingly
                 if '.' in mt_type_token:
                     # example: mt_type_token == '202.COV' -> type_MT 'fin.202.COV'
@@ -1291,6 +1419,17 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                                 # Aucune donnée trouvée
                                 row["donneur_dordre"] = None
                                 row["code_donneur_dordre"] = None
+                        
+                        # MT103 entrants BdF: remplir PAYS depuis RECEIVER BIC
+                        # si le correspondant (sender) est Banque de France et pays pas déjà rempli
+                        _sender_early = _extract_sender_bic(blk) or row.get("sender_bic")
+                        if _sender_early and _sender_early.upper() in BDF_BICS:
+                            if not row.get("pays_iso3"):
+                                _recv_bic = _extract_receiver_bic(blk) or row.get("receiver_bic")
+                                if _recv_bic and HAS_BIC_UTILS:
+                                    _country = bic_utils.map_code_to_country(_recv_bic, xlsx_path=bic_xlsx)
+                                    if _country:
+                                        row["pays_iso3"] = _country
                     else:
                         # Sortants: Nouvelle logique avec priorités
                         # Priorité 1: Codes Trésor (1001-6001) dans F50F
@@ -1307,39 +1446,62 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                             if tresor_info.get("country") and not row.get("pays_iso3"):
                                 row["pays_iso3"] = tresor_info["country"]
                         else:
-                            # Priorité 2: Code BIC depuis F52A
+                            # Déterminer si le correspondant est BdF (pour l'ordre des priorités)
+                            _recv = _extract_receiver_bic(blk) or row.get("receiver_bic")
+                            _is_bdf = _recv and _recv.upper() in BDF_BICS
+
+                            # Pré-extraire F52A et F50F Details
                             code_bic, nom_donneur = extract_donneur_outgoing_mt103(blk)
-                            if code_bic:
-                                row["code_donneur_dordre"] = code_bic
-                                if HAS_BIC_UTILS:
-                                    name = bic_utils.map_code_to_name(code_bic, xlsx_path=bic_xlsx)
-                                    row["donneur_dordre"] = name if name else nom_donneur
+                            nom_from_details = None
+                            if f50f_block and extract_name_from_f50f_details:
+                                nom_from_details = extract_name_from_f50f_details(f50f_block)
+
+                            if _is_bdf:
+                                # BdF: P2=Details (nom F50F), P3=CCF, P4=F52A BIC
+                                if nom_from_details:
+                                    row["donneur_dordre"] = nom_from_details
+                                    row["code_donneur_dordre"] = None
                                 else:
-                                    row["donneur_dordre"] = nom_donneur
+                                    ccf_info = None
+                                    if f50f_block and HAS_BIC_UTILS and extract_ccf_4digit_code_from_f50f:
+                                        ccf_info = extract_ccf_4digit_code_from_f50f(f50f_block, xlsx_path=bic_xlsx)
+                                    if ccf_info:
+                                        row["code_donneur_dordre"] = ccf_info["code"]
+                                        row["donneur_dordre"] = ccf_info["name"]
+                                        if ccf_info.get("country") and not row.get("pays_iso3"):
+                                            row["pays_iso3"] = ccf_info["country"]
+                                    elif code_bic:
+                                        row["code_donneur_dordre"] = code_bic
+                                        if HAS_BIC_UTILS:
+                                            name = bic_utils.map_code_to_name(code_bic, xlsx_path=bic_xlsx)
+                                            row["donneur_dordre"] = name if name else nom_donneur
+                                        else:
+                                            row["donneur_dordre"] = nom_donneur
+                                    elif nom_donneur:
+                                        row["donneur_dordre"] = nom_donneur
+                                        row["code_donneur_dordre"] = None
                             else:
-                                # Priorité 3: Codes CCF 4 chiffres dans F50F
-                                ccf_info = None
-                                if f50f_block and HAS_BIC_UTILS and extract_ccf_4digit_code_from_f50f:
-                                    ccf_info = extract_ccf_4digit_code_from_f50f(f50f_block, xlsx_path=bic_xlsx)
-                                
-                                if ccf_info:
-                                    # Code CCF trouvé
-                                    row["code_donneur_dordre"] = ccf_info["code"]
-                                    row["donneur_dordre"] = ccf_info["name"]
-                                    if ccf_info.get("country") and not row.get("pays_iso3"):
-                                        row["pays_iso3"] = ccf_info["country"]
+                                # Non-BdF: P2=F52A BIC, P3=CCF, P4=Details (ordre original)
+                                if code_bic:
+                                    row["code_donneur_dordre"] = code_bic
+                                    if HAS_BIC_UTILS:
+                                        name = bic_utils.map_code_to_name(code_bic, xlsx_path=bic_xlsx)
+                                        row["donneur_dordre"] = name if name else nom_donneur
+                                    else:
+                                        row["donneur_dordre"] = nom_donneur
                                 else:
-                                    # Priorité 4: Fallback - extraire le nom depuis F50F après "Details: Détails:"
-                                    # Structure: NameAndAddress -> Number: Numéro: 1/ -> Details: Détails: NOM
-                                    nom_from_details = None
-                                    if f50f_block and extract_name_from_f50f_details:
-                                        nom_from_details = extract_name_from_f50f_details(f50f_block)
-                                    
-                                    if nom_from_details:
+                                    ccf_info = None
+                                    if f50f_block and HAS_BIC_UTILS and extract_ccf_4digit_code_from_f50f:
+                                        ccf_info = extract_ccf_4digit_code_from_f50f(f50f_block, xlsx_path=bic_xlsx)
+                                    if ccf_info:
+                                        row["code_donneur_dordre"] = ccf_info["code"]
+                                        row["donneur_dordre"] = ccf_info["name"]
+                                        if ccf_info.get("country") and not row.get("pays_iso3"):
+                                            row["pays_iso3"] = ccf_info["country"]
+                                    elif nom_from_details:
                                         row["donneur_dordre"] = nom_from_details
                                         row["code_donneur_dordre"] = None
                                     elif nom_donneur:
-                                        # Dernier fallback: nom extrait par extract_donneur_outgoing_mt103
                                         row["donneur_dordre"] = nom_donneur
                                         row["code_donneur_dordre"] = None
                 else:
@@ -1555,6 +1717,24 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
             if mt_type_val and (mt_type_val.startswith("fin.910") or mt_type_val.startswith("fin.202")):
                 row = _citius33_f58a_fallback(row, blk, xlsx_path=bic_xlsx)
 
+        # RÈGLE BdF F58A: Pour MT202 entrants depuis Banque de France,
+        # si F52A contient un BIC non mappé, fallback sur F58A
+        if direction == "incoming" and sender_bic and sender_bic.upper() in BDF_BICS:
+            mt_type_val = row.get("type_MT", "")
+            if mt_type_val and mt_type_val.startswith("fin.202"):
+                row = _bdf_f58a_fallback(row, blk, xlsx_path=bic_xlsx)
+
+        # RÈGLE BdF-CORRESPONDANT: Pour MT202 sortants vers CITI/SCB,
+        # vérifier si le message doit aller en exception correspondant
+        is_bdf_corr_exception = False
+        if direction == "outgoing" and mt_type and mt_type.startswith("fin.202"):
+            _recv_exc = receiver_bic or row.get("receiver_bic") or ""
+            bdf_exc_comment = _check_mt202_outgoing_corr_exception(blk, _recv_exc)
+            if bdf_exc_comment:
+                logger.debug("mt_multi: Message %s identifié comme exception correspondant BdF (%s)", source_label, bdf_exc_comment)
+                row["commentaires"] = bdf_exc_comment
+                is_bdf_corr_exception = True
+
         # Post-traitement: remplir pays_iso3 depuis code_donneur_dordre si absent
         row = _fill_country_from_code(row, xlsx_path=bic_xlsx)
 
@@ -1579,6 +1759,8 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
         # Ajouter le message à la liste appropriée
         if is_banque_de_france:
             banque_de_france_rows.append(row)
+        elif is_bdf_corr_exception:
+            bdf_corr_exception_rows.append(row)
         elif is_beaccmcx091_mt202_outgoing:
             other_exceptions_rows.append(row)
         elif is_bc_exception:
@@ -1630,7 +1812,7 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                 else:
                     rows.append(row)
 
-    return rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, missing_codes
+    return rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, bdf_corr_exception_rows, missing_codes
 
 
 def extract_transfer_analysis(pdf_path: Path, bic_xlsx: Optional[str] = None) -> tuple[List[Dict], List[Dict], Dict[str, set]]:

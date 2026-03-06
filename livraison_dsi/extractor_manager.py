@@ -400,7 +400,7 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
             if blocks and len(blocks) > 1:
                 logger.info("%s: detected %d messages (using mt_multi).", p.name, len(blocks))
                 # Pass preloaded_text to avoid re-reading the PDF
-                rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction, preloaded_text=text)
+                rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, bdf_corr_exception_rows, missing_codes = mt_multi_module.extract_messages_from_pdf(p, direction=direction, preloaded_text=text)
                 # ensure backward compatibility: set institution_name from donneur_dordre if missing
                 for r in rows:
                     if "institution_name" not in r or not r.get("institution_name"):
@@ -443,14 +443,21 @@ def extract_dispatch(pdf_path: Path, direction: str = "incoming") -> tuple[List[
                     for k in ["date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
                         if k not in r:
                             r[k] = None
-                return rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, missing_codes
+                # apply same compatibility to bdf_corr_exception rows
+                for r in bdf_corr_exception_rows:
+                    if "institution_name" not in r or not r.get("institution_name"):
+                        r["institution_name"] = r.get("donneur_dordre") or r.get("donneur d'ordre") or None
+                    for k in ["date_reference", "reference", "type_MT", "pays_iso3", "beneficiaire", "montant", "devise", "source_pdf", "commentaires", "correspondant"]:
+                        if k not in r:
+                            r[k] = None
+                return rows, beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, forex_rows, bdf_corr_exception_rows, missing_codes
         except Exception as e:
             logger.exception("extract_dispatch: mt_multi detection/extraction failed for %s: %s", p.name, e)
             # fall through to single extractor
 
     # fallback: treat as single message
     single_row = extract_single(p, direction=direction)
-    return [single_row], beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, [], missing_codes
+    return [single_row], beaccmcx091_rows, exception_323201_rows, other_exceptions_rows, banque_de_france_rows, [], [], missing_codes
 
 
 def _ensure_minimal_row(p: Path, mt_type: Optional[str] = None) -> Dict:
@@ -560,7 +567,7 @@ def _sanitize_sheet_title(name: str, max_len: int = 31) -> str:
     return sanitized
 
 
-def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None, other_exceptions_rows: Optional[List[Dict]] = None, banque_de_france_rows: Optional[List[Dict]] = None, forex_rows: Optional[List[Dict]] = None, date_start: str = None, date_end: str = None) -> Path:
+def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None, other_exceptions_rows: Optional[List[Dict]] = None, banque_de_france_rows: Optional[List[Dict]] = None, forex_rows: Optional[List[Dict]] = None, bdf_corr_exception_rows: Optional[List[Dict]] = None, date_start: str = None, date_end: str = None) -> Path:
     """
     Create an Excel workbook with:
       - a 'summary' sheet containing one row per extracted file (display headers in French)
@@ -692,7 +699,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     # NOUVELLE FONCTIONNALITÉ: Détection des doublons potentiels (910 vs 202)
     # ÉTAPE 1: Détecter les doublons AVANT d'écrire dans summary
     # Combiner toutes les rows pour la détection
-    all_rows_for_duplicates = list(rows) + (beaccmcx091_rows or []) + (exception_323201_rows or []) + (other_exceptions_rows or [])
+    all_rows_for_duplicates = list(rows) + (beaccmcx091_rows or []) + (exception_323201_rows or []) + (other_exceptions_rows or []) + (banque_de_france_rows or []) + (forex_rows or []) + (bdf_corr_exception_rows or [])
     
     # Créer des groupes par (référence, montant) pour détecter les doublons
     potential_duplicates = []
@@ -922,6 +929,39 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         except Exception:
             pass
     
+    # ÉTAPE 5bis: Créer la feuille Exceptions_Correspondants (MT202 sortants avec exceptions BdF)
+    if bdf_corr_exception_rows is None:
+        bdf_corr_exception_rows = []
+    if bdf_corr_exception_rows:
+        sheet_index = 1
+        if beaccmcx091_rows:
+            sheet_index += 1
+        if exception_323201_rows:
+            sheet_index += 1
+        if other_exceptions_rows:
+            sheet_index += 1
+        if banque_de_france_rows:
+            sheet_index += 1
+        if forex_rows:
+            sheet_index += 1
+
+        bdf_exc_sheet = wb.create_sheet(title="Exceptions_Correspondants", index=sheet_index)
+        bdf_exc_sheet.append(display_headers)
+
+        for r in bdf_corr_exception_rows:
+            _write_row_to_sheet(bdf_exc_sheet, r)
+
+        # Adjust column widths
+        try:
+            for col_idx in range(1, len(display_headers) + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in bdf_exc_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10
+                )
+                bdf_exc_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+
     # ÉTAPE 6: Créer la feuille Doublons_potentiels (contient TOUS les doublons détectés)
     if potential_duplicates:
         sheet_index = 1
@@ -934,6 +974,8 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         if banque_de_france_rows:
             sheet_index += 1
         if forex_rows:
+            sheet_index += 1
+        if bdf_corr_exception_rows:
             sheet_index += 1
         
         dup_sheet = wb.create_sheet(title="Doublons_potentiels", index=sheet_index)
@@ -1770,5 +1812,268 @@ def create_mt950_reconciliation_workbook(
     logger.info(
         "MT950 reconciliation workbook created: %s (rapproches: %d, msg_nr: %d, f61_nr: %d)",
         out_path, len(rapproches), len(non_rapproches_messages), len(non_rapproches_f61),
+    )
+    return out_path
+
+
+# ================================================================
+# MODE 4 v2 : Rapprochement MT950 — feuilles séparées par catégorie
+# ================================================================
+
+def create_mt950_reconciliation_workbook_v2(
+    rapproches_by_cat: Dict[str, List[Dict]],
+    non_rap_msg_by_cat: Dict[str, List[Dict]],
+    non_rapproches_f61: List[Dict],
+    out_dir: Path,
+    sub_mode: str = "entrants",
+    date_start: str = None,
+    date_end: str = None,
+) -> Path:
+    """
+    Créer un workbook Excel pour le rapprochement MT950 v2.
+    
+    Produit des feuilles séparées par catégorie, exactement comme les modes 1/2,
+    avec des feuilles _rapprochés et _non_rapprochés pour chaque catégorie.
+
+    Catégories possibles : summary, BEACCMCX091, Exceptions_323201, 
+                           Autres_Exceptions, BANQUE DE FRANCE, forex
+
+    Sheets générées (pour chaque catégorie non vide) :
+    - <catégorie>_rap      — Messages de cette catégorie rapprochés avec F61
+    - <catégorie>_non_rap  — Messages de cette catégorie sans correspondance F61
+    
+    Plus :
+    - F61_non_rapproches   — Écritures F61 sans correspondance message
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    date_suffix = ""
+    if date_start and date_end:
+        date_suffix = f"_{date_start}_to_{date_end}"
+    elif date_start:
+        date_suffix = f"_from_{date_start}"
+    elif date_end:
+        date_suffix = f"_to_{date_end}"
+
+    out_path = out_dir / f"rapprochement_mt950_{sub_mode}{date_suffix}_{ts}.xlsx"
+
+    wb = Workbook()
+    # Supprimer la feuille par défaut, on va les créer nous-mêmes
+    wb.remove(wb.active)
+
+    def _convert_date_to_excel(date_str):
+        if not date_str:
+            return None
+        try:
+            if isinstance(date_str, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
+                return datetime.strptime(date_str, '%Y-%m-%d')
+            return date_str
+        except Exception:
+            return date_str
+
+    def _adjust_widths(sheet, num_cols):
+        try:
+            for col_idx in range(1, num_cols + 1):
+                vals = [cell.value for cell in sheet[get_column_letter(col_idx)] if cell.value is not None]
+                max_len = max((len(str(v)) for v in vals), default=10)
+                sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+        except Exception:
+            pass
+
+    def _format_f61_value_date(vd_raw):
+        """Format YYMMDD -> DD/MM/YYYY."""
+        if not vd_raw or len(vd_raw) != 6:
+            return vd_raw or ""
+        try:
+            return f"{vd_raw[4:6]}/{vd_raw[2:4]}/20{vd_raw[0:2]}"
+        except Exception:
+            return vd_raw
+
+    # Headers pour les feuilles rapprochées (F61 + message côte-à-côte)
+    rap_headers = [
+        "N° F61",
+        "MT950 C/D",
+        "MT950 Réf. Propriétaire",
+        "MT950 Réf. Institution",
+        "MT950 Date Valeur",
+        "MT950 Détails",
+        "Type MT",
+        "Référence",
+        "Date Référence",
+        "Montant",
+        "Devise",
+        "Code donneur d'ordre",
+        "Donneur d'ordre",
+        "Bénéficiaire",
+        "Pays ISO3",
+        "Correspondant",
+        "Commentaires",
+        "Source PDF",
+    ]
+
+    # Headers pour les feuilles non-rapprochées (identiques au mode standard)
+    msg_headers = [
+        "correspondant",
+        "date_reference",
+        "reference",
+        "reference_origine",
+        "type_MT",
+        "pays_iso3",
+        "Code du donneur d'ordre",
+        "donneur d'ordre",
+        "Bénéficiaire",
+        "montant",
+        "devise",
+        "commentaires",
+        "source_pdf",
+    ]
+
+    # Headers pour F61 non rapprochés
+    f61_nr_headers = [
+        "N° F61",
+        "C/D",
+        "Réf. Propriétaire",
+        "Réf. Institution",
+        "Code Id.",
+        "Montant",
+        "Date Valeur",
+        "Détails",
+    ]
+
+    # Ordre des catégories pour les feuilles
+    category_order = ["summary", "BEACCMCX091", "Exceptions_323201", 
+                      "Autres_Exceptions", "BANQUE DE FRANCE", "forex"]
+
+    sheet_names_created = []
+
+    for cat_name in category_order:
+        rap_rows = rapproches_by_cat.get(cat_name, [])
+        non_rap_rows = non_rap_msg_by_cat.get(cat_name, [])
+        
+        if not rap_rows and not non_rap_rows:
+            continue  # Skip catégorie vide
+        
+        # --- Feuille rapprochés ---
+        if rap_rows:
+            sheet_title_rap = _sanitize_sheet_title(f"{cat_name}_rap")
+            ws_rap = wb.create_sheet(title=sheet_title_rap)
+            ws_rap.append(rap_headers)
+            sheet_names_created.append(sheet_title_rap)
+
+            for r in rap_rows:
+                vd_display = _format_f61_value_date(r.get("mt950_value_date"))
+                date_ref = _convert_date_to_excel(r.get("msg_date_reference"))
+
+                row_data = [
+                    r.get("f61_index"),
+                    r.get("mt950_cd"),
+                    r.get("mt950_ref_owner"),
+                    r.get("mt950_ref_serv"),
+                    vd_display,
+                    r.get("mt950_supplementary_details"),
+                    r.get("msg_type_MT"),
+                    r.get("msg_reference"),
+                    date_ref,
+                    r.get("msg_montant"),
+                    r.get("msg_devise"),
+                    r.get("msg_code_donneur_dordre"),
+                    r.get("msg_donneur_dordre"),
+                    r.get("msg_beneficiaire"),
+                    r.get("msg_pays_iso3"),
+                    r.get("msg_correspondant"),
+                    r.get("msg_commentaires"),
+                    r.get("msg_source_pdf"),
+                ]
+                ws_rap.append(row_data)
+
+                current_row = ws_rap.max_row
+                if date_ref and isinstance(date_ref, datetime):
+                    ws_rap.cell(row=current_row, column=9).number_format = 'DD/MM/YYYY'
+
+            _adjust_widths(ws_rap, len(rap_headers))
+
+        # --- Feuille non-rapprochés ---
+        if non_rap_rows:
+            sheet_title_nonrap = _sanitize_sheet_title(f"{cat_name}_non_rap")
+            ws_nonrap = wb.create_sheet(title=sheet_title_nonrap)
+            ws_nonrap.append(msg_headers)
+            sheet_names_created.append(sheet_title_nonrap)
+
+            for r in non_rap_rows:
+                date_ref = _convert_date_to_excel(r.get("date_reference"))
+                row_data = [
+                    r.get("correspondant"),
+                    date_ref,
+                    r.get("reference"),
+                    r.get("reference_origine"),
+                    r.get("type_MT"),
+                    r.get("pays_iso3"),
+                    r.get("code_donneur_dordre"),
+                    r.get("donneur_dordre") or r.get("institution_name"),
+                    r.get("beneficiaire"),
+                    r.get("montant"),
+                    r.get("devise"),
+                    r.get("commentaires"),
+                    r.get("source_pdf"),
+                ]
+                ws_nonrap.append(row_data)
+                current_row = ws_nonrap.max_row
+                if date_ref and isinstance(date_ref, datetime):
+                    ws_nonrap.cell(row=current_row, column=2).number_format = 'DD/MM/YYYY'
+
+            _adjust_widths(ws_nonrap, len(msg_headers))
+
+    # --- Feuille F61_non_rapprochés ---
+    if non_rapproches_f61:
+        f61_nr_sheet = wb.create_sheet(title="F61_non_rapproches")
+        f61_nr_sheet.append(f61_nr_headers)
+        sheet_names_created.append("F61_non_rapproches")
+
+        for f in non_rapproches_f61:
+            vd_display = _format_f61_value_date(f.get("value_date"))
+            row_data = [
+                f.get("f61_index"),
+                f.get("cd"),
+                f.get("ref_owner"),
+                f.get("ref_serv"),
+                f.get("identification_code"),
+                f.get("amount"),
+                vd_display,
+                f.get("supplementary_details"),
+            ]
+            f61_nr_sheet.append(row_data)
+
+        _adjust_widths(f61_nr_sheet, len(f61_nr_headers))
+
+    # Si aucune feuille n'a été créée, ajouter une feuille vide
+    if not wb.sheetnames:
+        ws_empty = wb.create_sheet(title="Aucun_resultat")
+        ws_empty.append(["Aucun message extrait ou rapproché."])
+
+    # Ajouter des liens de navigation entre les feuilles
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        # Ajouter un lien retour vers la première feuille en première ligne (insertion)
+        first_sheet = wb.sheetnames[0]
+        if sheet_name != first_sheet:
+            ws.insert_rows(1, 1)
+            back_cell = ws.cell(row=1, column=1)
+            back_cell.value = f"⬅ Retour à {first_sheet}"
+            try:
+                escaped = first_sheet.replace("'", "''")
+                back_cell.hyperlink = f"#'{escaped}'!A1"
+                back_cell.style = "Hyperlink"
+            except Exception:
+                pass
+
+    wb.save(out_path)
+    
+    total_rap = sum(len(v) for v in rapproches_by_cat.values())
+    total_non_rap = sum(len(v) for v in non_rap_msg_by_cat.values())
+    logger.info(
+        "MT950 reconciliation workbook v2 created: %s (rapproches: %d, msg_non_rap: %d, f61_non_rap: %d, sheets: %s)",
+        out_path, total_rap, total_non_rap, len(non_rapproches_f61), sheet_names_created,
     )
     return out_path
