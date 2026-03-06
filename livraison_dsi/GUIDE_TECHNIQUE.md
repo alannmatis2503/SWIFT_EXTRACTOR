@@ -537,6 +537,9 @@ Message extrait
     │
     ├─ [1] BANQUE DE FRANCE ?     → banque_de_france_rows    (onglet BANQUE DE FRANCE)
     │
+    ├─ [1'] Exception correspondant BdF ? → bdf_corr_exception_rows (onglet Exceptions_Correspondants)
+    │       (CITI: BdF dans F57A / SCB: CITIUS33+36357124)
+    │
     ├─ [2] BEACCMCX091 MT202 ?    → other_exceptions_rows    (onglet Autres_Exceptions)
     │      (après test annulation)
     │
@@ -623,6 +626,81 @@ Pour les MT910, le bénéficiaire est également mis à jour (bénéficiaire = d
 
 > **Explication métier** : Citibank USA agit comme banque correspondante. Le champ F52A peut contenir le BIC d'une banque locale qui n'est pas dans notre référentiel. Dans ce cas, F58A contient le code de la sous-participation (compte de règlement) ou un code CCF qui permet d'identifier le vrai donneur d'ordre.
 
+### Règle spéciale Banque de France — Fallback F58A (MT202 entrants)
+
+Lorsque le correspondant (sender BIC) d'un message **entrant** est un BIC Banque de France (`BDFEFRPPCCT` ou `BDFEFRPPSRD`), un mécanisme de fallback analogue à CITIUS33 est activé :
+
+| Condition | Description |
+|-----------|-------------|
+| **Type** | `fin.202` |
+| **Direction** | `incoming` uniquement |
+| **Correspondant** | `BDFEFRPPCCT` ou `BDFEFRPPSRD` |
+| **Déclenchement** | Le code BIC extrait de F52A **n'est pas** trouvé dans `bic_codes.xlsx` |
+
+**Logique du fallback F58A/F58D** (par priorité) :
+
+| Priorité | Source | Méthode |
+|:--------:|--------|---------|
+| 1 | F58A/F58D | Code BIC strict → recherche dans `bic_codes.xlsx` (excluant les faux BIC) |
+| 2 | F58A/F58D | Code sous-participant à 4 chiffres → colonne `Reglement` de `bic_codes.xlsx` |
+
+### Règle BdF — PAYS via RECEIVER (MT103 entrants)
+
+Pour les MT103 entrants dont le correspondant (sender) est la Banque de France, la colonne PAYS est déterminée à partir du **BIC du RECEIVER** du message SWIFT (et non du donneur d'ordre).
+
+| Condition | Description |
+|-----------|-------------|
+| **Type** | `fin.103` |
+| **Direction** | `incoming` uniquement |
+| **Correspondant** | `BDFEFRPPCCT` ou `BDFEFRPPSRD` |
+| **Action** | `pays_iso3` rempli via le BIC RECEIVER → `bic_codes.xlsx` |
+
+> **Explication métier** : Pour les MT103 entrants via BdF, le donneur d'ordre est souvent hors du référentiel BEAC. La BIC du Receiver (qui est une banque BEAC) est plus fiable pour déterminer le pays.
+
+### Règle BdF — Inversion des priorités (MT103 sortants)
+
+Pour les MT103 sortants dont le correspondant (receiver) est la Banque de France, l'ordre des priorités d'extraction du donneur d'ordre est modifié :
+
+| Priorité | Source | Description |
+|:--------:|--------|-------------|
+| 1 | F50F | Codes Trésor (1001-6001) — identique au cas non-BdF |
+| **2** | **F50F** | **Nom extrait de "Details: Détails:"** (normalement P4) |
+| 3 | F50F | Codes CCF à 4 chiffres |
+| **4** | **F52A** | **Code BIC** (normalement P2) |
+
+> Pour les correspondants non-BdF, l'ordre reste : P1=Trésor, P2=F52A BIC, P3=CCF, P4=Details.
+
+### Règle CITI/SCB — Donneur = Bénéficiaire (MT202 sortants)
+
+Pour les MT202 sortants dont le receiver est `CITIGB2LXXX` ou `SCBLGB2LXXX`, le donneur d'ordre est forcé identique au bénéficiaire (extrait de F58A/F58D).
+
+| Condition | Description |
+|-----------|-------------|
+| **Type** | `fin.202` |
+| **Direction** | `outgoing` uniquement |
+| **Receiver** | `CITIGB2LXXX` ou `SCBLGB2LXXX` |
+| **Action** | `donneur_dordre = beneficiaire`, `code_donneur_dordre` = BIC du bénéficiaire |
+
+### 10.10 Exception Correspondants BdF (MT202 sortant)
+
+Des messages MT202 sortants vers CITI ou Standard Chartered sont routés vers la feuille **Exceptions_Correspondants** lorsque des conditions spécifiques sont remplies :
+
+**Correspondant CITIGB2LXXX** :
+
+| Paramètre | Valeur |
+|-----------|--------|
+| **Champ inspecté** | F57A |
+| **Condition** | Contient un BIC Banque de France (`BDFEFRPPCCT` ou `BDFEFRPPSRD`) |
+| **Action** | Commentaire + routage vers `bdf_corr_exception_rows` |
+
+**Correspondant SCBLGB2LXXX** :
+
+| Paramètre | Valeur |
+|-----------|--------|
+| **Champs inspectés** | F57A **ET** F58A |
+| **Condition** | F57A contient `CITIUS33` **ET** F58A contient `36357124` (les deux conditions simultanées) |
+| **Action** | Commentaire + routage vers `bdf_corr_exception_rows` |
+
 ### Filtrage des faux BIC
 
 Les chaînes suivantes sont exclues de la détection BIC (faux positifs courants) : `CAMEROON`, `GABON`, `FRANCE`, `CENTRAL`, `INTERNATIONAL`, `COMMERCIAL`, `NATIONAL`, etc. Elles respectent la syntaxe d'un code BIC (8–11 lettres majuscules) mais n'en sont pas.
@@ -708,7 +786,7 @@ Un doublon est détecté lorsque deux messages ont **la même clé** ET sont de 
 
 ### Périmètre de recherche
 
-La recherche de doublons s'effectue sur l'ensemble des messages, **toutes listes confondues** : `rows` + `beaccmcx091_rows` + `exception_323201_rows` + `other_exceptions_rows`.
+La recherche de doublons s'effectue sur l'ensemble des messages, **toutes listes confondues** : `rows` + `beaccmcx091_rows` + `exception_323201_rows` + `other_exceptions_rows` + `banque_de_france_rows` + `forex_rows` + `bdf_corr_exception_rows`.
 
 ### Traitement
 
@@ -914,6 +992,7 @@ Pour ajouter une nouvelle banque au référentiel :
 | `Autres_Exceptions` | Si non vide | Exceptions EUR, nivellement, salle des marchés, BC, BEACCMCX091-MT202 |
 | `BANQUE DE FRANCE` | Si non vide | MT103 USD avec BANQUE DE FRANCE / FW021083459 |
 | `forex` | Si non vide | MT910 forex |
+| `Exceptions_Correspondants` | Si non vide | MT202 sortants avec exceptions BdF correspondant (CITI/SCB) |
 | `Doublons_potentiels` | Si doublons détectés | Paires MT910/MT202 même référence + montant |
 | Par pays (`CMR`, `GAB`, `Operations_BEAC`…) | Si `pays_iso3` renseigné | Sous-ensemble par pays, trié par correspondant |
 | Par message (nom du PDF) | Pour chaque message | Feuille clé/valeur détaillée (debug) |
