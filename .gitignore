@@ -27,9 +27,13 @@ dist/
 alann
 alann.pub
 
-# Data files - IMPORTANT: Ne jamais pousser les PDFs
+# Data files - IMPORTANT: Ne jamais pousser les fichiers confidentiels
 *.pdf
-data/raw/*.pdf
+*.xlsx
+*.tmp
+*Zone.Identifier
+data/raw/
+data/output_test2/
 output/
 logs/
 
@@ -37,4 +41,6 @@ logs/
 manuella/
 Manuella/
 
+# Tokens / secrets
 .hf_token
+*.token
