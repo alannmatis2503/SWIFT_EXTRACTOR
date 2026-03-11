@@ -648,40 +648,48 @@ def _check_eur_exception(row: Dict, direction: str) -> Optional[str]:
 
 def _check_nivellement_exception(row: Dict, block_text: str, direction: str) -> Optional[str]:
     """
-    Vérifier si un MT910 doit être mis en exception pour nivellement.
+    Vérifier si un message (MT910 ou MT202 sortant) doit être mis en exception pour nivellement.
     Règles:
-    - Entrants: 5175 dans F25P (numéro de compte) ou NIVLT dans la référence
-    - Sortants: 5175 dans F53B ou F58A (numéro de compte)
+    - NIVLT dans la référence (F20) ou la référence d'origine (F21) -> nivellement (tous types)
+    - MT910 Entrants: 5175 dans F25P (numéro de compte)
+    - MT910 Sortants: 5175 dans F53B ou F58A (numéro de compte)
+    - MT202 Sortants: NIVLT dans la référence ou la référence d'origine
     
     Returns:
         "nivellement" si exception, None sinon
     """
     mt_type = row.get("type_MT") or ""
-    if not mt_type.startswith("fin.910"):
+    is_910 = mt_type.startswith("fin.910")
+    is_202 = mt_type.startswith("fin.202")
+    
+    if not is_910 and not is_202:
         return None
     
-    reference = row.get("reference") or ""
+    reference = (row.get("reference") or "").upper()
+    reference_origine = (row.get("reference_origine") or "").upper()
     
-    if direction == "incoming":
-        # Vérifier NIVLT dans la référence
-        if "NIVLT" in reference.upper():
-            return "nivellement"
-        
-        # Vérifier 5175 dans F25P
-        f25p_block = get_field_block(block_text, 'F25P') or get_field_block(block_text, 'F25')
-        if f25p_block and "5175" in f25p_block:
-            return "nivellement"
+    # NIVLT dans la référence ou la référence d'origine -> nivellement (tous types applicables)
+    if "NIVLT" in reference or "NIVLT" in reference_origine:
+        return "nivellement"
     
-    elif direction == "outgoing":
-        # Vérifier 5175 dans F53B
-        f53b_block = get_field_block(block_text, 'F53B') or get_field_block(block_text, 'F53')
-        if f53b_block and "5175" in f53b_block:
-            return "nivellement"
+    # Règles 5175 spécifiques au MT910
+    if is_910:
+        if direction == "incoming":
+            # Vérifier 5175 dans F25P
+            f25p_block = get_field_block(block_text, 'F25P') or get_field_block(block_text, 'F25')
+            if f25p_block and "5175" in f25p_block:
+                return "nivellement"
         
-        # Vérifier 5175 dans F58A
-        f58a_block = get_field_block(block_text, 'F58A') or get_field_block(block_text, 'F58')
-        if f58a_block and "5175" in f58a_block:
-            return "nivellement"
+        elif direction == "outgoing":
+            # Vérifier 5175 dans F53B
+            f53b_block = get_field_block(block_text, 'F53B') or get_field_block(block_text, 'F53')
+            if f53b_block and "5175" in f53b_block:
+                return "nivellement"
+            
+            # Vérifier 5175 dans F58A
+            f58a_block = get_field_block(block_text, 'F58A') or get_field_block(block_text, 'F58')
+            if f58a_block and "5175" in f58a_block:
+                return "nivellement"
     
     return None
 
@@ -1390,40 +1398,64 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                 # Traitement spécifique du donneur d'ordre pour MT103
                 if HAS_MT103_DONNEUR:
                     if direction == "incoming":
-                        # Entrants: Priorités pour extraction du donneur d'ordre
-                        # Priorité 1: Code BIC depuis F50K ou F50F
-                        code_bic, nom_donneur_fallback = extract_donneur_from_f50(blk)
-                        
-                        if code_bic:
-                            # Priorité 1: Code BIC trouvé
-                            row["code_donneur_dordre"] = code_bic
-                            if HAS_BIC_UTILS:
-                                name = bic_utils.map_code_to_name(code_bic, xlsx_path=bic_xlsx)
-                                row["donneur_dordre"] = name if name else nom_donneur_fallback
-                            else:
-                                row["donneur_dordre"] = nom_donneur_fallback
-                        else:
-                            # Pas de code BIC, chercher alternatives
-                            # Priorité 2: Extraction depuis F50F "Number: Numéro: 1/Details: Détails:"
-                            donneur_f50f_details = _extract_donneur_from_f50f_details(blk)
+                        # Déterminer si le sender est Banque de France
+                        _sender_early = _extract_sender_bic(blk) or row.get("sender_bic")
+                        _is_bdf_incoming = _sender_early and _sender_early.upper() in BDF_BICS
+
+                        # PRIORITÉ 0 (BdF uniquement): F57A pour le donneur d'ordre
+                        _f57a_resolved = False
+                        if _is_bdf_incoming and HAS_BIC_UTILS:
+                            f57a_block = get_field_block(blk, 'F57A')
+                            if f57a_block:
+                                f57a_code = bic_utils.get_donneur_from_f52(f57a_block, message_text=None, xlsx_path=bic_xlsx)
+                                if f57a_code and '/' in str(f57a_code):
+                                    _code, _name = str(f57a_code).split('/', 1)
+                                    row["code_donneur_dordre"] = _code
+                                    row["donneur_dordre"] = _name
+                                    row["institution_name"] = _name
+                                    if not row.get("code_banque"):
+                                        row["code_banque"] = _code
+                                    # Remplir le pays depuis le BIC F57A
+                                    _country_f57 = bic_utils.map_code_to_country(_code, xlsx_path=bic_xlsx)
+                                    if _country_f57:
+                                        row["pays_iso3"] = _country_f57
+                                    _f57a_resolved = True
+                                    logger.debug("mt_multi: MT103 entrant BdF - donneur d'ordre depuis F57A: %s", f57a_code)
+
+                        if not _f57a_resolved:
+                            # Entrants: Priorités pour extraction du donneur d'ordre
+                            # Priorité 1: Code BIC depuis F50K ou F50F
+                            code_bic, nom_donneur_fallback = extract_donneur_from_f50(blk)
                             
-                            if donneur_f50f_details:
-                                # Priorité 2: Nom extrait depuis F50F details
-                                row["donneur_dordre"] = donneur_f50f_details
-                                row["code_donneur_dordre"] = None
-                            elif nom_donneur_fallback:
-                                # Priorité 3: Fallback vers le nom extrait par extract_donneur_from_f50
-                                row["donneur_dordre"] = nom_donneur_fallback
-                                row["code_donneur_dordre"] = None
+                            if code_bic:
+                                # Priorité 1: Code BIC trouvé
+                                row["code_donneur_dordre"] = code_bic
+                                if HAS_BIC_UTILS:
+                                    name = bic_utils.map_code_to_name(code_bic, xlsx_path=bic_xlsx)
+                                    row["donneur_dordre"] = name if name else nom_donneur_fallback
+                                else:
+                                    row["donneur_dordre"] = nom_donneur_fallback
                             else:
-                                # Aucune donnée trouvée
-                                row["donneur_dordre"] = None
-                                row["code_donneur_dordre"] = None
+                                # Pas de code BIC, chercher alternatives
+                                # Priorité 2: Extraction depuis F50F "Number: Numéro: 1/Details: Détails:"
+                                donneur_f50f_details = _extract_donneur_from_f50f_details(blk)
+                                
+                                if donneur_f50f_details:
+                                    # Priorité 2: Nom extrait depuis F50F details
+                                    row["donneur_dordre"] = donneur_f50f_details
+                                    row["code_donneur_dordre"] = None
+                                elif nom_donneur_fallback:
+                                    # Priorité 3: Fallback vers le nom extrait par extract_donneur_from_f50
+                                    row["donneur_dordre"] = nom_donneur_fallback
+                                    row["code_donneur_dordre"] = None
+                                else:
+                                    # Aucune donnée trouvée
+                                    row["donneur_dordre"] = None
+                                    row["code_donneur_dordre"] = None
                         
                         # MT103 entrants BdF: remplir PAYS depuis RECEIVER BIC
                         # si le correspondant (sender) est Banque de France et pays pas déjà rempli
-                        _sender_early = _extract_sender_bic(blk) or row.get("sender_bic")
-                        if _sender_early and _sender_early.upper() in BDF_BICS:
+                        if _is_bdf_incoming:
                             if not row.get("pays_iso3"):
                                 _recv_bic = _extract_receiver_bic(blk) or row.get("receiver_bic")
                                 if _recv_bic and HAS_BIC_UTILS:
@@ -1701,7 +1733,7 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
             row["commentaires"] = eur_comment
             is_eur_exception = True
         
-        # NOUVELLE RÈGLE: Exceptions nivellement pour MT910
+        # RÈGLE: Exceptions nivellement pour MT910 et MT202 sortants
         is_nivellement_exception = False
         nivellement_comment = _check_nivellement_exception(row, blk, direction)
         if nivellement_comment:

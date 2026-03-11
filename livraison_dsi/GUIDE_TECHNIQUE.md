@@ -1,7 +1,7 @@
 # Guide Technique — PDF SWIFT Extractor
 
-**Version** : 5.0  
-**Date** : 6 mars 2026  
+**Version** : 6.0  
+**Date** : 11 mars 2026  
 **Destinataires** : Direction des Systèmes d'Information (DSI)  
 **Classification** : Document interne — Usage technique
 
@@ -459,12 +459,17 @@ Ces exceptions s'appliquent **uniquement si la devise est EUR**.
 | Direction | Sous-règle | Champ inspecté | Pattern recherché |
 |-----------|-----------|----------------|-------------------|
 | Entrant | Règle 1 | Référence (F20) | `NIVLT` |
+| Entrant | Règle 1b | Référence d'origine (F21) | `NIVLT` |
 | Entrant | Règle 2 | F25P ou F25 | `5175` |
-| Sortant | Règle 1 | F53B ou F53 | `5175` |
-| Sortant | Règle 2 | F58A ou F58 | `5175` |
+| Sortant | Règle 1 | Référence (F20) | `NIVLT` |
+| Sortant | Règle 1b | Référence d'origine (F21) | `NIVLT` |
+| Sortant | Règle 2 | F53B ou F53 | `5175` |
+| Sortant | Règle 3 | F58A ou F58 | `5175` |
 
-**Type** : `fin.910` uniquement.  
+**Type** : `fin.910` et `fin.202`.  
 **Action** : Commentaire `"nivellement"` + message routé vers `other_exceptions_rows`.
+
+> **Note** : La règle NIVLT s'applique désormais aussi bien aux MT910 qu'aux MT202 sortants. La recherche du motif `NIVLT` porte sur la référence (F20) **et** la référence d'origine (F21). Les règles 5175 (F25P, F53B, F58A) restent spécifiques aux MT910.
 
 ### 10.7 Exception BEACCMCX091 — MT910
 
@@ -582,9 +587,12 @@ L'extraction du donneur d'ordre suit un enchaînement de stratégies par priorit
 
 | Priorité | Source | Méthode |
 |:--------:|--------|---------|
+| **0** | **F57A** | **Si correspondant BdF (`BDFEFRPPCCT`/`BDFEFRPPSRD`) : code BIC extrait de F57A → recherche dans `bic_codes.xlsx`. Si résolu, le pays est déterminé via le BIC F57A.** |
 | 1 | F50K/F50F | Code BIC extrait → recherche dans `bic_codes.xlsx` |
 | 2 | F50F | Nom après `Number: Numéro: 1/Details: Détails:` (ligne de détails) |
 | 3 | F50F | Nom extrait par heuristique textuelle |
+
+> **Règle F57A BdF** : Pour les MT103 entrants dont le correspondant est la Banque de France, le champ F57A contient le BIC de la banque donatrice. Ce BIC est résolu en priorité absolue (priorité 0). Si la résolution F57A échoue, le système retombe sur la logique standard F50K/F50F.
 
 ### MT103 — Sortant
 
@@ -781,8 +789,9 @@ Clé = (reference.strip().upper(), float(montant))
 
 ### Condition de détection
 
-Un doublon est détecté lorsque deux messages ont **la même clé** ET sont de **types croisés** :
-- L'un est de type `fin.910` et l'autre de type `fin.202`, ou inversement
+Un doublon est détecté lorsque deux messages ont **la même clé**, **tous types confondus** :
+- La vérification porte sur l'ensemble des combinaisons de types (MT910, MT103, MT202)
+- Tout couple de messages partageant la même référence et le même montant est signalé comme doublon potentiel, quel que soit leur type
 
 ### Périmètre de recherche
 
@@ -956,7 +965,8 @@ Le fichier `data/bic_codes.xlsx` est le référentiel central de l'application. 
 |-------------|-----|--------|-------|
 | `_BIC_MAP_CACHE` | BIC 8 chars | Nom institution | Résolution BIC → nom |
 | `_BIC_FULLKEY_MAP` | BIC complet | Nom institution | Résolution BIC 11 chars |
-| `_BIC_COUNTRY_MAP` | BIC 8 chars | Code pays ISO3 | Résolution BIC → pays |
+| `_BIC_COUNTRY_MAP` | BIC 8 chars | Code pays ISO3 | Résolution BIC → pays (fallback) |
+| `_BIC_COUNTRY_FULLKEY_MAP` | BIC complet | Code pays ISO3 | Résolution BIC 11 chars → pays (prioritaire) |
 | `_REGLEMENT_MAP` | Code 4 chiffres | `{name, country, bic}` | Donneur d'ordre F52D / Trésor |
 | `_CCF_MAP` | CCF simplifié | `{name, country, bic, full_ccf}` | MT103 sortant codes CCF |
 | `_FOREX_CODES` | — (set) | Code BIC 8 chars | Détection MT910 forex |

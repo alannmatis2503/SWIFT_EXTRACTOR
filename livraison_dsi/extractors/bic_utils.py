@@ -1,36 +1,14 @@
+# backend/app/extractors/bic_utils.py
 """
-=============================================================================
- Utilitaires BIC — Résolution Code SWIFT → Nom de banque
-=============================================================================
- Ce module est au cœur de l'identification des institutions financières.
+Utilities to extract the IdentifierCode from F52A and to map the first-8-chars
+to a human-readable bank name using an Excel table (data/bic_codes.xlsx).
 
- Rôle principal :
-   Lire le fichier Excel référentiel (data/bic_codes.xlsx) et fournir des
-   fonctions de résolution :
-     Code BIC 8-11 caractères → Nom de la banque + Pays ISO3
-
- Fonctions exposées :
-   - load_bic_mapping()          : Charge l'annuaire BIC depuis Excel (cache)
-   - map_code_to_name(code)      : Code BIC → nom de banque
-   - map_code_to_country(code)   : Code BIC → pays ISO3 (ex: CMR, GAB)
-   - get_donneur_from_f52(text)  : Extrait le code depuis le champ F52A SWIFT
-   - map_reglement_code(code)    : Code règlement 4 chiffres → banque
-   - extract_tresor_code_from_f50f() : Détecte code Trésor dans F50F
-   - extract_ccf_4digit_code_from_f50f() : Détecte code CCF dans F50F
-   - add_bic_code_to_xlsx()      : Ajoute un nouveau code au fichier Excel
-
- Données référentielles (colonnes Excel attendues) :
-   - Code BIC   : Code SWIFT de l'institution (8 ou 11 caractères)
-   - Noms       : Nom complet de la banque
-   - Pays       : Code pays ISO3 (CMR, GAB, TCD, COG, GNQ, CAF)
-   - Reglement  : Code de règlement à 4 chiffres (ex: 8101, 8428)
-   - CCF        : Code CCF au format XX.XXXXXX.X.XXXX.X.X.X.X.X
-
- Mécanisme de cache :
-   Le chargement Excel est coûteux ; les résultats sont mis en cache
-   en mémoire via @lru_cache et des variables globales. Le cache est
-   invalidé automatiquement lors de l'ajout d'un nouveau code.
-============================================================================="""
+Provides:
+ - load_bic_mapping(xlsx_path: Optional[str]) -> Dict[str, str]
+ - map_code_to_name(code: str, xlsx_path: Optional[str]) -> Optional[str]
+ - get_name_for_code(code: str, xlsx_path: Optional[str]) -> Optional[str]  # alias for compatibility
+ - get_donneur_from_f52(f52_text, message_text=None, xlsx_path=None) -> Optional[str]
+"""
 from pathlib import Path
 import re
 from functools import lru_cache
@@ -54,9 +32,11 @@ _FALLBACK_TOKEN_RE = re.compile(r'\b([A-Z0-9]{8,11})\b', re.I)
 # module-level cache
 _BIC_MAP_CACHE: Optional[Dict[str, str]] = None
 _BIC_FULLKEY_MAP: Optional[Dict[str, str]] = None
-_BIC_COUNTRY_MAP: Optional[Dict[str, str]] = None  # Code BIC -> Pays (ISO3)
+_BIC_COUNTRY_MAP: Optional[Dict[str, str]] = None  # Code BIC 8-char -> Pays (ISO3)
+_BIC_COUNTRY_FULLKEY_MAP: Optional[Dict[str, str]] = None  # Code BIC full -> Pays (ISO3)
 _REGLEMENT_MAP: Optional[Dict[str, Dict[str, str]]] = None  # Code règlement 4 chiffres -> {name, country, bic}
 _CCF_MAP: Optional[Dict[str, Dict[str, str]]] = None  # Code CCF simplifié -> {name, country, bic}
+_FOREX_CODES: Optional[set] = None  # Codes BIC forex (depuis feuille 'forex' de bic_codes.xlsx)
 
 # Codes Trésor valides à chercher dans F50F (les infos seront récupérées depuis Excel)
 TRESOR_CODES_VALIDES = frozenset(["1001", "2001", "3001", "4001", "5001", "6001"])
@@ -118,7 +98,7 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
 
     Expected columns: try to detect columns for code and name (flexible).
     """
-    global _BIC_MAP_CACHE, _BIC_FULLKEY_MAP, _BIC_COUNTRY_MAP, _REGLEMENT_MAP, _CCF_MAP
+    global _BIC_MAP_CACHE, _BIC_FULLKEY_MAP, _BIC_COUNTRY_MAP, _BIC_COUNTRY_FULLKEY_MAP, _REGLEMENT_MAP, _CCF_MAP
     if _BIC_MAP_CACHE is not None and _BIC_FULLKEY_MAP is not None:
         return _BIC_MAP_CACHE
 
@@ -126,6 +106,7 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
     mapping_full: Dict[str, str] = {}
     country_map: Dict[str, str] = {}
+    country_fullkey_map: Dict[str, str] = {}
     reglement_map: Dict[str, Dict[str, str]] = {}
     ccf_map: Dict[str, Dict[str, str]] = {}
 
@@ -133,6 +114,7 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
         _BIC_MAP_CACHE = {}
         _BIC_FULLKEY_MAP = {}
         _BIC_COUNTRY_MAP = {}
+        _BIC_COUNTRY_FULLKEY_MAP = {}
         _REGLEMENT_MAP = {}
         _CCF_MAP = {}
         return _BIC_MAP_CACHE
@@ -195,6 +177,7 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
         _BIC_MAP_CACHE = {}
         _BIC_FULLKEY_MAP = {}
         _BIC_COUNTRY_MAP = {}
+        _BIC_COUNTRY_FULLKEY_MAP = {}
         _REGLEMENT_MAP = {}
         _CCF_MAP = {}
         return _BIC_MAP_CACHE
@@ -233,6 +216,9 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
         # also keep full mapping for exact 11-char keys (useful for BEACCMCX100)
         if len(raw_code) >= 8:
             mapping_full[raw_code] = raw_name or mapping.get(raw_code[:8], "")
+            # also store full-key country
+            if raw_country:
+                country_fullkey_map[raw_code] = raw_country
         
         # Store reglement code mapping (4 digit codes)
         if raw_reglement and re.match(r'^\d{4,}$', raw_reglement):
@@ -263,9 +249,52 @@ def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
     _BIC_MAP_CACHE = mapping
     _BIC_FULLKEY_MAP = mapping_full
     _BIC_COUNTRY_MAP = country_map
+    _BIC_COUNTRY_FULLKEY_MAP = country_fullkey_map
     _REGLEMENT_MAP = reglement_map
     _CCF_MAP = ccf_map
     return _BIC_MAP_CACHE
+
+
+def load_forex_codes(xlsx_path: Optional[str] = None) -> set:
+    """
+    Charger les codes BIC forex depuis la feuille 'forex' de bic_codes.xlsx.
+    Les codes sont mis en cache après le premier chargement.
+    
+    Returns:
+        Set de codes BIC (8 premiers caractères, uppercase) considérés comme forex.
+    """
+    global _FOREX_CODES
+    if _FOREX_CODES is not None:
+        return _FOREX_CODES
+    
+    fp = Path(xlsx_path) if xlsx_path else Path("data/bic_codes.xlsx")
+    if not fp.exists():
+        _FOREX_CODES = set()
+        return _FOREX_CODES
+    
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(str(fp), read_only=True, data_only=True)
+        if 'forex' not in wb.sheetnames:
+            _FOREX_CODES = set()
+            wb.close()
+            return _FOREX_CODES
+        
+        ws = wb['forex']
+        codes = set()
+        for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+            if row[0]:
+                code = str(row[0]).strip().upper()
+                if code:
+                    codes.add(code[:8])  # Normaliser à 8 caractères
+        wb.close()
+        _FOREX_CODES = codes
+        return _FOREX_CODES
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("load_forex_codes: error loading forex sheet: %s", e)
+        _FOREX_CODES = set()
+        return _FOREX_CODES
 
 
 def map_code_to_name(code: str, xlsx_path: Optional[str] = None) -> Optional[str]:
@@ -474,14 +503,17 @@ def extract_ccf_4digit_code_from_f50f(f50f_text: str, xlsx_path: Optional[str] =
 def map_code_to_country(code: str, xlsx_path: Optional[str] = None) -> Optional[str]:
     """
     Map a raw code (8..11 chars) to country ISO3 code using loaded mapping.
-    Uses the first 8 characters of the code to look up the country.
+    Checks exact full key first (11 chars), then falls back to 8-char prefix.
     Returns the country ISO3 code (e.g., "CMR") or None if not found.
     """
     if not code:
         return None
     _ = load_bic_mapping(xlsx_path=xlsx_path)  # populate caches
-    global _BIC_COUNTRY_MAP
+    global _BIC_COUNTRY_MAP, _BIC_COUNTRY_FULLKEY_MAP
     code_u = code.strip().upper()
+    # Try exact full key first (resolves e.g. BEACCMCX090 vs BEACCMCX091)
+    if _BIC_COUNTRY_FULLKEY_MAP and code_u in _BIC_COUNTRY_FULLKEY_MAP:
+        return _BIC_COUNTRY_FULLKEY_MAP[code_u]
     key8 = code_u[:8]
     if _BIC_COUNTRY_MAP and key8 in _BIC_COUNTRY_MAP:
         return _BIC_COUNTRY_MAP[key8]
@@ -536,10 +568,11 @@ def add_bic_code_to_xlsx(code: str, name: str, country: str, xlsx_path: Optional
         wb.save(fp)
         
         # Clear caches so next load picks up new data
-        global _BIC_MAP_CACHE, _BIC_FULLKEY_MAP, _BIC_COUNTRY_MAP
+        global _BIC_MAP_CACHE, _BIC_FULLKEY_MAP, _BIC_COUNTRY_MAP, _BIC_COUNTRY_FULLKEY_MAP
         _BIC_MAP_CACHE = None
         _BIC_FULLKEY_MAP = None
         _BIC_COUNTRY_MAP = None
+        _BIC_COUNTRY_FULLKEY_MAP = None
         load_bic_mapping.cache_clear()
         
         logger.info("Added BIC code: %s (%s) - %s", code, name, country)

@@ -696,7 +696,7 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
             except Exception:
                 pass  # Si le lien échoue, on garde juste le texte
 
-    # NOUVELLE FONCTIONNALITÉ: Détection des doublons potentiels (910 vs 202)
+    # FONCTIONNALITÉ: Détection des doublons potentiels (910, 103, 202 — tous types confondus)
     # ÉTAPE 1: Détecter les doublons AVANT d'écrire dans summary
     # Combiner toutes les rows pour la détection
     all_rows_for_duplicates = list(rows) + (beaccmcx091_rows or []) + (exception_323201_rows or []) + (other_exceptions_rows or []) + (banque_de_france_rows or []) + (forex_rows or []) + (bdf_corr_exception_rows or [])
@@ -720,27 +720,19 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
             key = (str(reference).strip().upper(), float(montant) if montant else 0)
             
             if key in seen_keys:
-                # Doublon potentiel trouvé
+                # Doublon potentiel trouvé entre deux messages de types quelconques
                 prev_row = seen_keys[key]
-                prev_type = prev_row.get("type_MT") or ""
                 
-                # Un doublon est si c'est un 910 vs 202 (ou l'inverse)
-                is_910_vs_202 = (
-                    ("910" in mt_type and "202" in prev_type) or
-                    ("202" in mt_type and "910" in prev_type)
-                )
+                # Ajouter les deux dans la liste des doublons potentiels
+                if prev_row not in potential_duplicates:
+                    potential_duplicates.append(prev_row)
+                if r not in potential_duplicates:
+                    potential_duplicates.append(r)
                 
-                if is_910_vs_202:
-                    # Ajouter les deux dans la liste des doublons potentiels
-                    if prev_row not in potential_duplicates:
-                        potential_duplicates.append(prev_row)
-                    if r not in potential_duplicates:
-                        potential_duplicates.append(r)
-                    
-                    # NOUVELLE LOGIQUE: Exclure le second du summary, marquer le premier
-                    # On garde le premier message vu (prev_row) et on exclut le second (r)
-                    rows_to_exclude_from_summary.add(id(r))
-                    rows_to_mark_as_duplicate.add(id(prev_row))
+                # Exclure le second du summary, marquer le premier
+                # On garde le premier message vu (prev_row) et on exclut le second (r)
+                rows_to_exclude_from_summary.add(id(r))
+                rows_to_mark_as_duplicate.add(id(prev_row))
             else:
                 seen_keys[key] = r
     
