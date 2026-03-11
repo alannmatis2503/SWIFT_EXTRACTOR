@@ -1407,20 +1407,28 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                         if _is_bdf_incoming and HAS_BIC_UTILS:
                             f57a_block = get_field_block(blk, 'F57A')
                             if f57a_block:
-                                f57a_code = bic_utils.get_donneur_from_f52(f57a_block, message_text=None, xlsx_path=bic_xlsx)
-                                if f57a_code and '/' in str(f57a_code):
-                                    _code, _name = str(f57a_code).split('/', 1)
-                                    row["code_donneur_dordre"] = _code
-                                    row["donneur_dordre"] = _name
-                                    row["institution_name"] = _name
+                                # Extraire le BIC directement depuis F57A (alphanumérique, 8-11 chars)
+                                # On cherche tous les candidats et on retient le premier reconnu dans bic_codes.xlsx
+                                _f57a_candidates = re.findall(r'[A-Z]{4}[A-Z]{2}[A-Z0-9]{2,5}', f57a_block.upper())
+                                _f57a_bic = None
+                                for _cand in _f57a_candidates:
+                                    # Tronquer à 11 max (format BIC standard)
+                                    _cand = _cand[:11]
+                                    if bic_utils.map_code_to_name(_cand, xlsx_path=bic_xlsx):
+                                        _f57a_bic = _cand
+                                        break
+                                if _f57a_bic:
+                                    _name_f57 = bic_utils.map_code_to_name(_f57a_bic, xlsx_path=bic_xlsx)
+                                    row["code_donneur_dordre"] = _f57a_bic
+                                    row["donneur_dordre"] = _name_f57
+                                    row["institution_name"] = _name_f57
                                     if not row.get("code_banque"):
-                                        row["code_banque"] = _code
-                                    # Remplir le pays depuis le BIC F57A
-                                    _country_f57 = bic_utils.map_code_to_country(_code, xlsx_path=bic_xlsx)
+                                        row["code_banque"] = _f57a_bic
+                                    _country_f57 = bic_utils.map_code_to_country(_f57a_bic, xlsx_path=bic_xlsx)
                                     if _country_f57:
                                         row["pays_iso3"] = _country_f57
                                     _f57a_resolved = True
-                                    logger.debug("mt_multi: MT103 entrant BdF - donneur d'ordre depuis F57A: %s", f57a_code)
+                                    logger.debug("mt_multi: MT103 entrant BdF - donneur d'ordre depuis F57A: %s / %s", _f57a_bic, _name_f57)
 
                         if not _f57a_resolved:
                             # Entrants: Priorités pour extraction du donneur d'ordre
