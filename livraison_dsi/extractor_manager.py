@@ -714,10 +714,12 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         
         # Pour les MT910, utiliser F20 comme référence (déjà fait dans l'extraction)
         reference = r.get("reference")
+        row_direction = r.get("direction", "")
         
         if reference and montant is not None:
-            # Normaliser la clé
-            key = (str(reference).strip().upper(), float(montant) if montant else 0)
+            # Normaliser la clé — inclure direction pour ne pas considérer
+            # un entrant et un sortant de même ref/montant comme doublons
+            key = (str(reference).strip().upper(), float(montant) if montant else 0, row_direction)
             
             if key in seen_keys:
                 # Doublon potentiel trouvé entre deux messages de types quelconques
