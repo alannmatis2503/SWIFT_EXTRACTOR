@@ -19,6 +19,11 @@ try:
     from extractors import bic_utils
     from extractors.mt950 import extract_mt950_entries, match_f61_with_messages
     from extractor_manager import create_mt950_reconciliation_workbook, create_mt950_reconciliation_workbook_v2
+    from extractors.excel_extractor import extract_excel_files, detect_correspondant_from_file
+    from extractors.eastnet_extractor import (
+        extract_from_rje_files as eastnet_extract,
+        extract_mt950_entries_from_rje_files,
+    )
 except Exception as e:
     st.error(f"Impossible d'importer l'extracteur backend: {e}")
     st.stop()
@@ -39,32 +44,36 @@ st.set_page_config(page_title="PDF SWIFT Extractor", layout="wide", page_icon="�
 
 # Header avec style
 st.markdown("""
-    <h1 style='text-align: center;'>📄 PDF SWIFT Extractor</h1>
-    <p style='text-align: center; color: gray;'>Extraction automatique de messages MT103, MT202, MT910</p>
+    <h1 style='text-align: center;'>📄 SWIFT Extractor</h1>
+    <p style='text-align: center; color: gray;'>Extraction automatique de messages SWIFT depuis PDF et fichiers Excel</p>
 """, unsafe_allow_html=True)
 
 with st.expander("📖 Mode d'emploi", expanded=False):
     st.markdown("""
     **Comment utiliser l'application :**
-    1. Sélectionnez le type de messages (entrants ou sortants)
-    2. Glissez-déposez un ou plusieurs fichiers PDF
+    1. Sélectionnez le type de messages (entrants, sortants, analyse, rapprochement, ou Excel)
+    2. Glissez-déposez un ou plusieurs fichiers PDF ou Excel
     3. Choisissez une date de référence (optionnel)
     4. Cliquez sur **Extraire**
     5. Téléchargez le fichier Excel généré
     
-    **Types de messages supportés :**
+    **Types de messages supportés (PDF) :**
     - **MT202** : Virements interbancaires
     - **MT103** : Virements clients
     - **MT910** : Confirmations de crédit
     - **MT900/fin.900** : Analyse des transferts exécutés
+    
+    **Fichiers Excel supportés :**
+    - **BDF (Banque de France)** : Relevés de compte avec colonnes Date/Libellé/Référence/Contrepartie/Débit/Crédit
+    - **CITI (EUR et USD)** : Transactions avec colonnes Date/Devise/Montant/Bénéficiaire/Référence/Détails
     """)
 
 # Direction selector
 st.markdown("### 📨 Type de messages")
 direction = st.radio(
     "Sélectionnez le type de messages à extraire",
-    ("incoming", "outgoing", "transfer_analysis", "mt950_reconciliation"),
-    format_func=lambda x: {"incoming": "📥 Messages Entrants (MT202, MT103, MT910)", "outgoing": "📤 Messages Sortants (MT202, MT103)", "transfer_analysis": "🔄 Analyse Transferts Exécutés (MT202/MT103 + fin.900)", "mt950_reconciliation": "📊 Rapprochement MT950"}.get(x, x),
+    ("incoming", "outgoing", "transfer_analysis", "mt950_reconciliation", "excel_extraction", "eastnet_extraction"),
+    format_func=lambda x: {"incoming": "📥 Messages Entrants (MT202, MT103, MT910)", "outgoing": "📤 Messages Sortants (MT202, MT103)", "transfer_analysis": "🔄 Analyse Transferts Exécutés (MT202/MT103 + fin.900)", "mt950_reconciliation": "📊 Rapprochement MT950", "excel_extraction": "📊 Extraction Fichiers Excel (BDF, CITI, Standard)", "eastnet_extraction": "📦 Archive EastNet (RJE)"}.get(x, x),
     horizontal=False
 )
 
@@ -74,11 +83,18 @@ elif direction == "outgoing":
     st.info("**Messages sortants** : Pour les MT202, le bénéficiaire sera extrait depuis F58A.")
 elif direction == "mt950_reconciliation":
     st.info("**Rapprochement MT950** : Charge le(s) fichier(s) MT950 et les fichiers de messages (MT202, MT103, MT910). Rapproche les écritures F61 du MT950 avec les messages par référence + montant.")
+elif direction == "excel_extraction":
+    st.info("**Extraction Excel** : Charge les fichiers Excel de correspondants (BDF, CITI, Standard ou CITI USD Relevé de compte). Applique les règles de routage (BEACCMCX091, T2PI/T2RM/T2PL, nivellement, forex, exception BC, intérêts). Génère deux fichiers (entrants et sortants).")
+elif direction == "eastnet_extraction":
+    st.info("**Archive EastNet (RJE)** : Pour l'instant, ce mode propose la logique du mode 1 (messages entrants) et du mode 4 (rapprochement MT950), directement à partir de fichiers RJE.")
 else:
     st.info("**Analyse Transferts Exécutés** : Charge les fichiers MT900 d'un côté et les fichiers MT103/MT202 de l'autre. Le système match les références (F21 du MT900 = F20 du MT103/MT202) pour compléter les infos.")
 
 # File uploader(s) - différent selon le mode
-st.markdown("### 📁 Fichiers PDF")
+if direction == "excel_extraction":
+    st.markdown("### 📁 Fichiers Excel")
+else:
+    st.markdown("### 📁 Fichiers PDF")
 
 # Gestion du Clear All : utiliser un compteur pour régénérer les clés des uploaders
 if 'uploader_key_counter' not in st.session_state:
@@ -91,6 +107,10 @@ def clear_all_files():
     st.session_state.extraction_results = None
     st.session_state.excel_data = None
     st.session_state.excel_filename = None
+    st.session_state.excel_data_entrant = None
+    st.session_state.excel_filename_entrant = None
+    st.session_state.excel_data_sortant = None
+    st.session_state.excel_filename_sortant = None
 
 # Bouton Clear All
 col_clear1, col_clear2 = st.columns([4, 1])
@@ -123,8 +143,12 @@ if direction == "transfer_analysis":
     
     # Pour compatibilité avec le reste du code
     uploaded_files = None
+    uploaded_rje_files = None
     uploaded_mt950_files = None
     uploaded_mt950_msg_files = None
+    uploaded_excel_files = None
+    uploaded_rje_mt900_files = None
+    uploaded_rje_sortants_files = None
 elif direction == "mt950_reconciliation":
     # Mode Rapprochement MT950: deux zones + sous-mode
     mt950_sub_mode = st.radio(
@@ -158,8 +182,150 @@ elif direction == "mt950_reconciliation":
     )
     
     uploaded_files = None
+    uploaded_rje_files = None
     uploaded_mt900_files = None
     uploaded_mt103_202_files = None
+    uploaded_excel_files = None
+    uploaded_rje_mt900_files = None
+    uploaded_rje_sortants_files = None
+elif direction == "eastnet_extraction":
+    # Mode EastNet RJE: sélecteur de correspondant + uploader .rje
+    eastnet_sub_mode = st.radio(
+        "Sous-mode EastNet",
+        ("rje_incoming_mode1", "rje_outgoing_mode2", "rje_transfer_analysis_mode3", "rje_mt950_mode4"),
+        format_func=lambda x: {
+            "rje_incoming_mode1": "📥 Mode 1 RJE — Messages entrants (MT202, MT103, MT910)",
+            "rje_outgoing_mode2": "📤 Mode 2 RJE — Messages sortants (MT202, MT103)",
+            "rje_transfer_analysis_mode3": "🔄 Mode 3 RJE — Analyse Transferts Exécutés (MT202/MT103 + fin.900)",
+            "rje_mt950_mode4": "📊 Mode 4 RJE — Rapprochement MT950",
+        }.get(x, x),
+        horizontal=False
+    )
+
+    rje_correspondant = st.radio(
+        "Correspondant",
+        ("CITIUS33XXX", "CITIGB2LXXX", "BDFEFRPPXXX", "SCBLGB2LXXX"),
+        format_func=lambda x: {
+            "CITIUS33XXX": "🏦 CITI USD (CITIUS33XXX)",
+            "CITIGB2LXXX": "🏦 CITI EUR (CITIGB2LXXX)",
+            "BDFEFRPPXXX": "🏦 Banque de France (BDFEFRPPXXX)",
+            "SCBLGB2LXXX": "🏦 Standard (SCBLGB2LXXX)",
+        }.get(x, x),
+        horizontal=True
+    )
+    st.caption("La direction est détectée automatiquement depuis le bloc 2 SWIFT: I=sortant, O=entrant.")
+
+    if eastnet_sub_mode in ("rje_incoming_mode1", "rje_outgoing_mode2"):
+        _label = (
+            "Déposez vos fichiers RJE de messages entrants ici"
+            if eastnet_sub_mode == "rje_incoming_mode1"
+            else "Déposez vos fichiers RJE de messages sortants ici"
+        )
+        uploaded_rje_files = st.file_uploader(
+            _label,
+            type=["rje"],
+            accept_multiple_files=True,
+            help="Archives EastNet au format RJE (messages SWIFT bruts)",
+            key=f"rje_uploader{uploader_suffix}"
+        )
+        uploaded_rje_mt950_files = None
+        uploaded_rje_msg_files = None
+        uploaded_rje_mt900_files = None
+        uploaded_rje_sortants_files = None
+        mt950_sub_mode = "entrants"
+    elif eastnet_sub_mode == "rje_transfer_analysis_mode3":
+        st.markdown("#### 📤 Fichiers RJE des messages sortants (MT202/MT103)")
+        uploaded_rje_sortants_files = st.file_uploader(
+            "Déposez les fichiers RJE des messages sortants",
+            type=["rje"],
+            accept_multiple_files=True,
+            help="Archives EastNet contenant les MT202/MT103 sortants",
+            key=f"rje_sortants_uploader{uploader_suffix}"
+        )
+        st.markdown("#### 🔄 Fichiers RJE des confirmations MT900")
+        uploaded_rje_mt900_files = st.file_uploader(
+            "Déposez les fichiers RJE contenant les MT900",
+            type=["rje"],
+            accept_multiple_files=True,
+            help="Archives EastNet contenant les confirmations MT900 (fin.900)",
+            key=f"rje_mt900_uploader{uploader_suffix}"
+        )
+        uploaded_rje_files = None
+        uploaded_rje_mt950_files = None
+        uploaded_rje_msg_files = None
+        mt950_sub_mode = "entrants"
+    else:
+        mt950_sub_mode = st.radio(
+            "Sous-mode de rapprochement",
+            ("entrants", "sortants"),
+            format_func=lambda x: "📥 Entrants (Crédit C)" if x == "entrants" else "📤 Sortants (Débit D)",
+            horizontal=True
+        )
+        st.markdown("#### 📊 Fichiers RJE contenant les MT950")
+        uploaded_rje_mt950_files = st.file_uploader(
+            "Déposez les fichiers RJE contenant les MT950",
+            type=["rje"],
+            accept_multiple_files=True,
+            help="Fichiers RJE avec messages MT950 (tags :61:)",
+            key=f"rje_mt950_uploader{uploader_suffix}"
+        )
+        msg_dir_label = "entrants (MT202, MT103, MT910)" if mt950_sub_mode == "entrants" else "sortants (MT202, MT103)"
+        st.markdown(f"#### 📨 Fichiers RJE de messages {msg_dir_label}")
+        uploaded_rje_msg_files = st.file_uploader(
+            f"Déposez les fichiers RJE de messages {msg_dir_label}",
+            type=["rje"],
+            accept_multiple_files=True,
+            help=f"Fichiers RJE contenant les messages {msg_dir_label}",
+            key=f"rje_msg_uploader{uploader_suffix}"
+        )
+        uploaded_rje_files = None
+
+    # Pour compatibilité avec le reste du code
+    uploaded_files = None
+    uploaded_mt900_files = None
+    uploaded_mt103_202_files = None
+    uploaded_mt950_files = None
+    uploaded_mt950_msg_files = None
+    uploaded_excel_files = None
+
+elif direction == "excel_extraction":
+    # Mode Excel: sélecteur de correspondant + uploader xlsx/xls
+    excel_correspondant = st.radio(
+        "Correspondant Excel",
+        ("BDF", "CITI", "Standard", "CITI_USD_Releve"),
+        format_func=lambda x: {
+            "BDF": "🏦 BDF (Banque de France)",
+            "CITI": "🏦 CITI (Citibank EUR / USD)",
+            "Standard": "🏦 Standard (SCBL)",
+            "CITI_USD_Releve": "🏦 CITI USD (Relevé de compte)",
+        }.get(x, x),
+        horizontal=True
+    )
+    if excel_correspondant == "BDF":
+        st.caption("Relevés BDF : colonnes Date opération / Date valeur / Libellé mouvement / Référence demandeur / Référence client / Nom contrepartie / Débit / Crédit")
+    elif excel_correspondant == "CITI":
+        st.caption("CITI : colonnes Date de valeur / Date du relevé / Devise / Montant / Bénéficiaire-Remettant / Type / Référence bancaire / Description / Détails du paiement")
+    elif excel_correspondant == "CITI_USD_Releve":
+        st.caption("Relevé de compte CITI USD brut (.xls) : sections journalières avec Entry Date / Value Date / Customer Reference / Bank Reference / Transaction Description / By Order Of / Transaction Amount")
+    else:
+        st.caption("Standard (SCBL) : colonnes Account / Currency / Date / Description / Withdrawal / Deposit / Balance")
+
+    uploaded_excel_files = st.file_uploader(
+        "Déposez vos fichiers Excel (.xlsx ou .xls) ici",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+        help="Fichiers Excel du correspondant sélectionné",
+        key=f"excel_uploader{uploader_suffix}"
+    )
+
+    # Pour compatibilité avec le reste du code
+    uploaded_files = None
+    uploaded_mt900_files = None
+    uploaded_mt103_202_files = None
+    uploaded_mt950_files = None
+    uploaded_mt950_msg_files = None
+    uploaded_rje_mt900_files = None
+    uploaded_rje_sortants_files = None
 else:
     # Mode standard: un seul uploader
     uploaded_files = st.file_uploader(
@@ -169,14 +335,18 @@ else:
         help="Vous pouvez sélectionner plusieurs fichiers à la fois",
         key=f"main_uploader{uploader_suffix}"
     )
+    uploaded_rje_files = None
     uploaded_mt900_files = None
     uploaded_mt103_202_files = None
     uploaded_mt950_files = None
     uploaded_mt950_msg_files = None
+    uploaded_excel_files = None
+    uploaded_rje_mt900_files = None
+    uploaded_rje_sortants_files = None
 
 # Date filter - PLAGE DE DATES
 st.markdown("### 📅 Filtre par plage de dates")
-from datetime import date as date_type, timedelta
+from datetime import date as date_type, datetime, timedelta
 default_date = date_type.today()
 col_date1, col_date2 = st.columns(2)
 with col_date1:
@@ -235,6 +405,43 @@ if run_button:
             has_files = False
         else:
             has_files = True
+    elif direction == "excel_extraction":
+        if not uploaded_excel_files:
+            st.warning("⚠️ Aucun fichier Excel sélectionné.")
+            has_files = False
+        else:
+            has_files = True
+    elif direction == "eastnet_extraction":
+        if eastnet_sub_mode in ("rje_incoming_mode1", "rje_outgoing_mode2"):
+            if not uploaded_rje_files:
+                st.warning("⚠️ Aucun fichier RJE sélectionné.")
+                has_files = False
+            else:
+                has_files = True
+        elif eastnet_sub_mode == "rje_transfer_analysis_mode3":
+            if not uploaded_rje_sortants_files and not uploaded_rje_mt900_files:
+                st.warning("⚠️ Aucun fichier RJE sélectionné. Chargez les fichiers sortants et les fichiers MT900.")
+                has_files = False
+            elif not uploaded_rje_sortants_files:
+                st.warning("⚠️ Aucun fichier RJE sortants (MT202/MT103) sélectionné.")
+                has_files = False
+            elif not uploaded_rje_mt900_files:
+                st.warning("⚠️ Aucun fichier RJE MT900 sélectionné.")
+                has_files = False
+            else:
+                has_files = True
+        else:
+            if not uploaded_rje_mt950_files and not uploaded_rje_msg_files:
+                st.warning("⚠️ Aucun fichier RJE sélectionné. Chargez les fichiers MT950 et les fichiers messages.")
+                has_files = False
+            elif not uploaded_rje_mt950_files:
+                st.warning("⚠️ Aucun fichier RJE MT950 sélectionné.")
+                has_files = False
+            elif not uploaded_rje_msg_files:
+                st.warning("⚠️ Aucun fichier RJE de messages sélectionné.")
+                has_files = False
+            else:
+                has_files = True
     else:
         if not uploaded_files:
             st.warning("⚠️ Aucun fichier sélectionné.")
@@ -243,10 +450,15 @@ if run_button:
             has_files = True
     
     if has_files:
-        # Réinitialiser les résultats précédents
+        # Réinitialiser les résultats précédents (y compris les paires entrant/sortant
+        # pour éviter qu'un ancien run laisse afficher des fichiers obsolètes)
         st.session_state.extraction_results = None
         st.session_state.excel_data = None
         st.session_state.excel_filename = None
+        st.session_state.excel_data_entrant = None
+        st.session_state.excel_filename_entrant = None
+        st.session_state.excel_data_sortant = None
+        st.session_state.excel_filename_sortant = None
         
         rows = []
         beaccmcx091_rows = []  # Liste séparée pour les BEACCMCX091
@@ -504,6 +716,430 @@ if run_button:
                 if n_rap > 0 or n_non > 0:
                     st.caption(f"  📂 **{cat_name}** : {n_rap} rapprochés, {n_non} non rapprochés")
             
+        elif direction == "excel_extraction":
+            # ======== MODE EXTRACTION EXCEL (BDF, CITI) ========
+            progress = st.progress(0, text="Initialisation...")
+            total = len(uploaded_excel_files)
+            idx = 0
+
+            st.info(f"🔄 Traitement de {total} fichier(s) Excel ({excel_correspondant})...")
+
+            temp_excel_paths = []
+            for uf in uploaded_excel_files:
+                idx += 1
+                progress.progress(idx / total, text=f"Enregistrement : {uf.name} ({idx}/{total})")
+                try:
+                    tmp_path = save_uploaded_to_temp(uf)
+                    tmp_dirs.append(tmp_path.parent)
+                    temp_excel_paths.append(str(tmp_path))
+                except Exception as e:
+                    errors.append((uf.name, f"Impossible d'enregistrer temporairement: {e}"))
+                    st.error(f"❌ Erreur avec {uf.name}")
+
+            if temp_excel_paths:
+                try:
+                    # Trouver le fichier bic_codes.xlsx
+                    bic_file = ROOT / "data" / "bic_codes.xlsx"
+                    if not bic_file.exists():
+                        bic_file = Path("data/bic_codes.xlsx")
+                    xlsx_bic_path = str(bic_file) if bic_file.exists() else None
+
+                    new_rows, new_beac_rows, new_other_exc_rows, new_forex_rows, new_bdf_rows, missing_codes = extract_excel_files(
+                        temp_excel_paths, excel_correspondant, xlsx_bic_path=xlsx_bic_path
+                    )
+
+                    all_missing_codes["unmapped"].update(missing_codes.get("unmapped", set()))
+                    all_missing_codes["empty"].update(missing_codes.get("empty", set()))
+
+                    # Normaliser les rows (même pattern que le mode standard)
+                    def _normalize_excel_rows(row_list, target_list):
+                        for r in row_list:
+                            if "beneficiaire" not in r:
+                                r["beneficiaire"] = None
+                            if "donneur_dordre" not in r:
+                                r["donneur_dordre"] = r.get("institution_name")
+                            if not r.get("type_MT"):
+                                r["type_MT"] = None
+                            target_list.append(r)
+
+                    _normalize_excel_rows(new_rows, rows)
+                    _normalize_excel_rows(new_beac_rows, beaccmcx091_rows)
+                    _normalize_excel_rows(new_other_exc_rows, other_exceptions_rows)
+                    _normalize_excel_rows(new_forex_rows, forex_rows)
+                    _normalize_excel_rows(new_bdf_rows, banque_de_france_rows)
+
+                    beac_msg = f" + {len(new_beac_rows)} BEACCMCX091" if new_beac_rows else ""
+                    other_exc_msg = f" + {len(new_other_exc_rows)} autres exceptions" if new_other_exc_rows else ""
+                    forex_msg = f" + {len(new_forex_rows)} forex" if new_forex_rows else ""
+                    bdf_msg = f" + {len(new_bdf_rows)} Banque de France" if new_bdf_rows else ""
+
+                    st.success(f"✅ {total} fichier(s) Excel : {len(new_rows)} opération(s){beac_msg}{other_exc_msg}{forex_msg}{bdf_msg}")
+
+                except Exception as e:
+                    tb = traceback.format_exc()
+                    errors.append(("Extraction Excel", str(e)))
+                    st.error(f"❌ Erreur lors de l'extraction Excel")
+                    with st.expander("Détails de l'erreur"):
+                        st.code(tb)
+
+            progress.empty()
+
+        elif direction == "eastnet_extraction":
+            # ======== MODE EASTNET RJE ========
+            if eastnet_sub_mode in ("rje_incoming_mode1", "rje_outgoing_mode2"):
+                _is_outgoing = (eastnet_sub_mode == "rje_outgoing_mode2")
+                _mode_label = "mode 2" if _is_outgoing else "mode 1"
+                _dir_label = "sortants" if _is_outgoing else "entrants"
+                _dir_value = "outgoing" if _is_outgoing else "incoming"
+
+                progress = st.progress(0, text="Initialisation...")
+                total = len(uploaded_rje_files)
+                idx = 0
+
+                st.info(f"🔄 EastNet {_mode_label}: traitement de {total} fichier(s) RJE ({rje_correspondant})...")
+
+                bic_file = ROOT / "data" / "bic_codes.xlsx"
+                if not bic_file.exists():
+                    bic_file = Path("data/bic_codes.xlsx")
+                xlsx_bic_path = str(bic_file) if bic_file.exists() else None
+
+                temp_rje_paths = []
+                for uf in uploaded_rje_files:
+                    idx += 1
+                    progress.progress(idx / total, text=f"Enregistrement : {uf.name} ({idx}/{total})")
+                    try:
+                        tmp_path = save_uploaded_to_temp(uf)
+                        tmp_dirs.append(tmp_path.parent)
+                        temp_rje_paths.append(tmp_path)
+                    except Exception as e:
+                        errors.append((uf.name, f"Impossible d'enregistrer temporairement: {e}"))
+                        st.error(f"❌ Erreur avec {uf.name}")
+
+                if temp_rje_paths:
+                    try:
+                        # Mode 1 (entrants) ou Mode 2 (sortants): pré-filtrer pour
+                        # n'analyser que la direction concernée + les types MT
+                        # supportés par chaque direction. Accélère fortement le
+                        # traitement des gros fichiers RJE multi-directions.
+                        _allowed_dirs = {_dir_value}
+                        _allowed_types = ({"202", "103"} if _is_outgoing
+                                          else {"202", "103", "910"})
+                        (new_incoming, new_outgoing, new_beac_rows, new_exc_323201,
+                         new_other_exc, new_bdf_rows, new_forex_rows, _new_bdf_corr,
+                         missing_codes) = eastnet_extract(
+                            temp_rje_paths, correspondant=rje_correspondant,
+                            xlsx_path=xlsx_bic_path,
+                            allowed_directions=_allowed_dirs,
+                            allowed_mt_types=_allowed_types,
+                        )
+                        all_missing_codes["unmapped"].update(missing_codes.get("unmapped", set()))
+                        all_missing_codes["empty"].update(missing_codes.get("empty", set()))
+
+                        def _norm_rje(r_list):
+                            for r in r_list:
+                                r.setdefault("beneficiaire", None)
+                                r.setdefault("donneur_dordre", r.get("institution_name"))
+                                r.setdefault("type_MT", None)
+                                r["direction"] = _dir_value
+
+                        _main_rows = new_outgoing if _is_outgoing else new_incoming
+                        _norm_rje(_main_rows)
+                        for lst in (new_beac_rows, new_exc_323201, new_other_exc, new_bdf_rows, new_forex_rows):
+                            _norm_rje(lst)
+
+                        rows.extend(_main_rows)
+                        beaccmcx091_rows.extend(new_beac_rows)
+                        # exception_323201 ne s'applique qu'aux entrants (MT202)
+                        if not _is_outgoing:
+                            exception_323201_rows.extend(new_exc_323201)
+                        other_exceptions_rows.extend(new_other_exc)
+                        banque_de_france_rows.extend(new_bdf_rows)
+                        forex_rows.extend(new_forex_rows)
+
+                        st.success(
+                            f"✅ {total} fichier(s) RJE ({_mode_label}): "
+                            f"{len(_main_rows)} {_dir_label}"
+                            + (f" + {len(new_beac_rows)} BEACCMCX091" if new_beac_rows else "")
+                            + (f" + {len(new_exc_323201)} exceptions 323201" if (new_exc_323201 and not _is_outgoing) else "")
+                            + (f" + {len(new_other_exc)} autres exceptions" if new_other_exc else "")
+                            + (f" + {len(new_bdf_rows)} Banque de France" if new_bdf_rows else "")
+                            + (f" + {len(new_forex_rows)} forex" if new_forex_rows else "")
+                        )
+
+                    except Exception as e:
+                        tb = traceback.format_exc()
+                        errors.append(("Extraction EastNet RJE", str(e)))
+                        st.error(f"❌ Erreur lors de l'extraction EastNet {_mode_label}")
+                        with st.expander("Détails de l'erreur"):
+                            st.code(tb)
+
+                progress.empty()
+            elif eastnet_sub_mode == "rje_transfer_analysis_mode3":
+                # ======== MODE 3 EastNet RJE : Analyse Transferts Exécutés ========
+                from extractor_manager import match_mt900_with_transfers, create_transfer_analysis_workbook
+                from extractors.eastnet_extractor import (
+                    extract_from_rje_files as _ee_extract,
+                    extract_mt900_from_rje_files as _ee_mt900_extract,
+                )
+
+                total_files = len(uploaded_rje_sortants_files) + len(uploaded_rje_mt900_files)
+                progress = st.progress(0, text="Initialisation...")
+                idx = 0
+
+                st.info(
+                    f"🔄 EastNet mode 3 : {len(uploaded_rje_sortants_files)} fichier(s) sortants + "
+                    f"{len(uploaded_rje_mt900_files)} fichier(s) MT900 ({rje_correspondant})..."
+                )
+
+                bic_file = ROOT / "data" / "bic_codes.xlsx"
+                if not bic_file.exists():
+                    bic_file = Path("data/bic_codes.xlsx")
+                xlsx_bic_path = str(bic_file) if bic_file.exists() else None
+
+                # Sauvegarder en temporaire
+                tmp_sortants_paths = []
+                for uf in uploaded_rje_sortants_files:
+                    idx += 1
+                    progress.progress(idx / total_files, text=f"Sortants : {uf.name} ({idx}/{total_files})")
+                    try:
+                        tmp_path = save_uploaded_to_temp(uf)
+                        tmp_dirs.append(tmp_path.parent)
+                        tmp_sortants_paths.append(tmp_path)
+                    except Exception as e:
+                        errors.append((uf.name, f"Impossible d'enregistrer temporairement: {e}"))
+                        st.error(f"❌ Erreur avec {uf.name}")
+
+                tmp_mt900_paths = []
+                for uf in uploaded_rje_mt900_files:
+                    idx += 1
+                    progress.progress(idx / total_files, text=f"MT900 : {uf.name} ({idx}/{total_files})")
+                    try:
+                        tmp_path = save_uploaded_to_temp(uf)
+                        tmp_dirs.append(tmp_path.parent)
+                        tmp_mt900_paths.append(tmp_path)
+                    except Exception as e:
+                        errors.append((uf.name, f"Impossible d'enregistrer temporairement: {e}"))
+                        st.error(f"❌ Erreur avec {uf.name}")
+
+                if tmp_sortants_paths and tmp_mt900_paths:
+                    try:
+                        # 1) Extraire tous les MT202/MT103 sortants + catégories d'exception
+                        # Mode 3: on n'a besoin que des sortants MT202/MT103 → pré-filtrer.
+                        (new_incoming, new_outgoing, new_beac_rows, new_exc_323201,
+                         new_other_exc, new_bdf_rows, new_forex_rows, _new_bdf_corr,
+                         missing_codes) = _ee_extract(
+                            tmp_sortants_paths, correspondant=rje_correspondant,
+                            xlsx_path=xlsx_bic_path,
+                            allowed_directions={"outgoing"},
+                            allowed_mt_types={"202", "103"},
+                        )
+                        all_missing_codes["unmapped"].update(missing_codes.get("unmapped", set()))
+                        all_missing_codes["empty"].update(missing_codes.get("empty", set()))
+
+                        # Tous les transferts sortants (incl. BEAC, BDF, forex, exceptions)
+                        # sont considérés comme candidats au matching MT900.
+                        # Chaque ligne est taguée avec sa catégorie d'origine pour que
+                        # create_transfer_analysis_workbook puisse les router vers
+                        # la bonne feuille (main / BEACCMCX091 / Exceptions_323201 / ...)
+                        def _tag(rows_list, cat):
+                            for _r in rows_list:
+                                _r["_category"] = cat
+                                _r.setdefault("direction", "outgoing")
+                            return list(rows_list)
+
+                        all_transfers = (
+                            _tag(new_outgoing, "main")
+                            + _tag(new_beac_rows, "beaccmcx091")
+                            + _tag(new_exc_323201, "exception_323201")
+                            + _tag(new_other_exc, "other_exception")
+                            + _tag(new_bdf_rows, "banque_de_france")
+                            + _tag(new_forex_rows, "forex")
+                            + _tag(_new_bdf_corr, "bdf_corr_exception")
+                        )
+
+                        # 2) Extraire tous les MT900
+                        all_mt900 = _ee_mt900_extract(
+                            tmp_mt900_paths, correspondant=rje_correspondant,
+                            xlsx_path=xlsx_bic_path
+                        )
+
+                        # 3) Matcher MT900 ↔ transferts via F21 = F20
+                        matched_mt900, suspens, exception_mt900, unmatched_mt900 = (
+                            match_mt900_with_transfers(all_mt900, all_transfers)
+                        )
+
+                        rows.extend(matched_mt900)
+                        st.session_state['suspens_rows'] = suspens
+                        st.session_state['exception_mt900_rows'] = exception_mt900
+                        st.session_state['unmatched_mt900_rows'] = unmatched_mt900
+
+                        st.success(
+                            f"✅ {len(all_mt900)} MT900 extraits, {len(all_transfers)} transferts sortants → "
+                            f"{len(matched_mt900)} matchés, {len(unmatched_mt900)} MT900 non rapprochés, "
+                            f"{len(suspens)} en suspens, {len(exception_mt900)} en exception"
+                        )
+
+                    except Exception as e:
+                        tb = traceback.format_exc()
+                        errors.append(("Extraction EastNet mode 3", str(e)))
+                        st.error("❌ Erreur lors de l'extraction EastNet mode 3")
+                        with st.expander("Détails de l'erreur"):
+                            st.code(tb)
+
+                progress.empty()
+            else:
+                total_files = len(uploaded_rje_mt950_files) + len(uploaded_rje_msg_files)
+                progress = st.progress(0, text="Initialisation...")
+                idx = 0
+
+                msg_direction = "incoming" if mt950_sub_mode == "entrants" else "outgoing"
+                st.info(
+                    f"🔄 EastNet mode 4: {len(uploaded_rje_mt950_files)} fichier(s) MT950 RJE "
+                    f"et {len(uploaded_rje_msg_files)} fichier(s) messages RJE ({mt950_sub_mode})..."
+                )
+
+                bic_file = ROOT / "data" / "bic_codes.xlsx"
+                if not bic_file.exists():
+                    bic_file = Path("data/bic_codes.xlsx")
+                xlsx_bic_path = str(bic_file) if bic_file.exists() else None
+
+                # Étape 1: extraire F61 depuis les RJE MT950
+                temp_mt950_paths = []
+                for uf in uploaded_rje_mt950_files:
+                    idx += 1
+                    progress.progress(idx / total_files, text=f"MT950 RJE : {uf.name} ({idx}/{total_files})")
+                    try:
+                        tmp_path = save_uploaded_to_temp(uf)
+                        tmp_dirs.append(tmp_path.parent)
+                        temp_mt950_paths.append(tmp_path)
+                    except Exception as e:
+                        errors.append((uf.name, f"Impossible d'enregistrer temporairement: {e}"))
+                        st.error(f"❌ Erreur avec {uf.name}")
+
+                all_f61_entries = extract_mt950_entries_from_rje_files(temp_mt950_paths)
+                target_cd = "C" if mt950_sub_mode == "entrants" else "D"
+                n_target = sum(1 for e in all_f61_entries if e.get("cd") == target_cd)
+                st.success(f"✅ MT950 RJE: {len(all_f61_entries)} F61 extraits ({n_target} {target_cd})")
+
+                # Étape 2: extraire les messages RJE et classer comme mode 4 existant
+                all_summary_rows = []
+                all_beac_rows = []
+                all_exc_323201_rows = []
+                all_other_exc_rows = []
+                all_bdf_rows = []
+                all_forex_rows_mt950 = []
+                all_bdf_corr_exc_rows_mt950 = []
+
+                for uf in uploaded_rje_msg_files:
+                    idx += 1
+                    progress.progress(idx / total_files, text=f"Messages RJE : {uf.name} ({idx}/{total_files})")
+                    try:
+                        tmp_path = save_uploaded_to_temp(uf)
+                        tmp_dirs.append(tmp_path.parent)
+                        (new_incoming, new_outgoing, new_beac_rows, new_exc_rows,
+                         new_other_exc_rows, new_bdf_rows, new_forex_rows, new_bdf_corr_exc_rows,
+                         missing) = eastnet_extract(
+                            [tmp_path], correspondant=rje_correspondant, xlsx_path=xlsx_bic_path,
+                            allowed_directions={msg_direction},
+                            allowed_mt_types=({"202", "103"} if msg_direction == "outgoing"
+                                              else {"202", "103", "910"}),
+                        )
+                        all_missing_codes["unmapped"].update(missing.get("unmapped", set()))
+                        all_missing_codes["empty"].update(missing.get("empty", set()))
+
+                        msg_rows = new_incoming if msg_direction == "incoming" else new_outgoing
+
+                        def _normalize_rows(row_list, source_name):
+                            for r in row_list:
+                                r.setdefault("beneficiaire", None)
+                                r.setdefault("donneur_dordre", r.get("institution_name") or None)
+                                r.setdefault("type_MT", None)
+                                if not r.get("source_pdf"):
+                                    r["source_pdf"] = source_name
+
+                        def _filter_valid(rlist):
+                            return [r for r in rlist if r.get("type_MT") and any(t in r.get("type_MT") for t in ("202", "103", "910"))]
+
+                        _normalize_rows(msg_rows, uf.name)
+                        _normalize_rows(new_beac_rows, uf.name)
+                        _normalize_rows(new_exc_rows, uf.name)
+                        _normalize_rows(new_other_exc_rows, uf.name)
+                        _normalize_rows(new_bdf_rows, uf.name)
+                        _normalize_rows(new_forex_rows, uf.name)
+                        _normalize_rows(new_bdf_corr_exc_rows, uf.name)
+
+                        all_summary_rows.extend(_filter_valid(msg_rows))
+                        all_beac_rows.extend(_filter_valid(new_beac_rows))
+                        all_exc_323201_rows.extend(_filter_valid(new_exc_rows))
+                        all_other_exc_rows.extend(_filter_valid(new_other_exc_rows))
+                        all_bdf_rows.extend(_filter_valid(new_bdf_rows))
+                        all_forex_rows_mt950.extend(_filter_valid(new_forex_rows))
+                        all_bdf_corr_exc_rows_mt950.extend(_filter_valid(new_bdf_corr_exc_rows))
+                    except Exception as e:
+                        tb = traceback.format_exc()
+                        errors.append((uf.name, str(e)))
+                        st.error(f"❌ Erreur: {uf.name}")
+                        with st.expander(f"Détails de l'erreur pour {uf.name}"):
+                            st.code(tb)
+
+                progress.progress(1.0, text="Rapprochement en cours...")
+                from extractors.mt950 import match_f61_with_messages as match_f61
+
+                categories = {
+                    "summary": all_summary_rows,
+                    "BEACCMCX091": all_beac_rows,
+                    "Exceptions_323201": all_exc_323201_rows,
+                    "Autres_Exceptions": all_other_exc_rows,
+                    "BANQUE DE FRANCE": all_bdf_rows,
+                    "forex": all_forex_rows_mt950,
+                    "Exceptions_Correspondants": all_bdf_corr_exc_rows_mt950,
+                }
+
+                all_msg_pool = []
+                msg_to_category = {}
+                for cat_name, cat_rows in categories.items():
+                    for r in cat_rows:
+                        all_msg_pool.append(r)
+                        msg_to_category[id(r)] = cat_name
+
+                rapproches_raw, non_rap_msg_raw, non_rap_f61 = match_f61(
+                    all_f61_entries, all_msg_pool, sub_mode=mt950_sub_mode
+                )
+
+                rapproches_by_cat = {cat: [] for cat in categories}
+                for rap in rapproches_raw:
+                    matched_msg_ref = rap.get("msg_reference")
+                    matched_msg_src = rap.get("msg_source_pdf")
+                    matched_msg_type = rap.get("msg_type_MT")
+                    matched_msg_montant = rap.get("msg_montant")
+                    found_cat = "summary"
+                    for msg in all_msg_pool:
+                        if (msg.get("reference") == matched_msg_ref and
+                            msg.get("source_pdf") == matched_msg_src and
+                            msg.get("type_MT") == matched_msg_type and
+                            msg.get("montant") == matched_msg_montant):
+                            found_cat = msg_to_category.get(id(msg), "summary")
+                            break
+                    rapproches_by_cat[found_cat].append(rap)
+
+                non_rap_msg_by_cat = {cat: [] for cat in categories}
+                for msg in non_rap_msg_raw:
+                    cat = msg_to_category.get(id(msg), "summary")
+                    non_rap_msg_by_cat[cat].append(msg)
+
+                rows = rapproches_raw
+                st.session_state.mt950_rapproches_by_cat = rapproches_by_cat
+                st.session_state.mt950_non_rap_msg_by_cat = non_rap_msg_by_cat
+                st.session_state.mt950_non_rap_f61 = non_rap_f61
+                st.session_state.mt950_sub_mode = mt950_sub_mode
+                st.session_state.mt950_categories = categories
+
+                progress.empty()
+                st.info(
+                    f"📊 **Résumé** : {len(rapproches_raw)} rapprochés, "
+                    f"{len(non_rap_msg_raw)} messages non rapprochés, {len(non_rap_f61)} F61 non rapprochés"
+                )
+
         else:
             # ======== MODE STANDARD (incoming/outgoing) ========
             progress = st.progress(0, text="Initialisation...")
@@ -691,8 +1327,13 @@ if run_button:
             except Exception:
                 pass
         
-        # Filter by date range (plage de dates) — sauf mode MT950 reconciliation
-        if direction != "mt950_reconciliation" and date_debut and date_fin and rows and date_debut <= date_fin:
+        # Filter by date range (plage de dates) — sauf mode MT950 reconciliation et mode 3 (transfer_analysis)
+        if not (
+            direction == "mt950_reconciliation"
+            or direction == "transfer_analysis"
+            or (direction == "eastnet_extraction" and eastnet_sub_mode == "rje_mt950_mode4")
+            or (direction == "eastnet_extraction" and eastnet_sub_mode == "rje_transfer_analysis_mode3")
+        ) and date_debut and date_fin and rows and date_debut <= date_fin:
             date_debut_str = date_debut.strftime("%Y-%m-%d")
             date_fin_str = date_fin.strftime("%Y-%m-%d")
             rows_filtered = [r for r in rows if r.get("date_reference") and date_debut_str <= r.get("date_reference") <= date_fin_str]
@@ -704,9 +1345,25 @@ if run_button:
             rows = rows_filtered
         
         # Stocker les résultats si disponibles
-        if rows:
+        # On considère qu'il y a un résultat dès qu'au moins une des listes
+        # (summary ou exceptions) contient des messages — sinon, le cas
+        # "tout en BEACCMCX091" (ou tout en exception) ne déclencherait
+        # jamais la création du workbook.
+        _has_any_result = bool(
+            rows
+            or beaccmcx091_rows
+            or exception_323201_rows
+            or other_exceptions_rows
+            or banque_de_france_rows
+            or forex_rows
+            or bdf_corr_exception_rows
+        )
+        if _has_any_result:
             # Ensure backward-compatibility (sauf mode MT950 où rows = rapprochés)
-            if direction != "mt950_reconciliation":
+            if not (
+                direction == "mt950_reconciliation"
+                or (direction == "eastnet_extraction" and eastnet_sub_mode == "rje_mt950_mode4")
+            ):
                 for r in rows:
                     if not r.get("institution_name"):
                         r["institution_name"] = r.get("donneur_dordre")
@@ -715,7 +1372,10 @@ if run_button:
             
             temp_outdir = Path(tempfile.mkdtemp(prefix="swift_out_"))
             try:
-                if direction == "transfer_analysis":
+                if direction == "transfer_analysis" or (
+                    direction == "eastnet_extraction"
+                    and eastnet_sub_mode == "rje_transfer_analysis_mode3"
+                ):
                     # Mode analyse des transferts - utiliser create_transfer_analysis_workbook
                     from extractor_manager import create_transfer_analysis_workbook
                     suspens_rows = st.session_state.get('suspens_rows', [])
@@ -734,7 +1394,7 @@ if run_button:
                     
                     # Afficher le résumé
                     st.info(f"📊 **Résumé** : {len(rows)} transfert(s) exécuté(s), {len(unmatched_mt900_rows)} MT900 non matchés, {len(suspens_rows)} en suspens, {len(exception_mt900_rows)} en exception")
-                elif direction == "mt950_reconciliation":
+                elif direction == "mt950_reconciliation" or (direction == "eastnet_extraction" and eastnet_sub_mode == "rje_mt950_mode4"):
                     # Mode rapprochement MT950 v2 — feuilles séparées par catégorie
                     rapproches_by_cat = st.session_state.get('mt950_rapproches_by_cat', {})
                     non_rap_msg_by_cat = st.session_state.get('mt950_non_rap_msg_by_cat', {})
@@ -750,13 +1410,113 @@ if run_button:
                         date_start=date_start_str, date_end=date_end_str,
                     )
                 else:
-                    out_path = create_workbook(rows, temp_outdir, direction=direction, beaccmcx091_rows=beaccmcx091_rows, exception_323201_rows=exception_323201_rows, other_exceptions_rows=other_exceptions_rows, banque_de_france_rows=banque_de_france_rows, forex_rows=forex_rows, bdf_corr_exception_rows=bdf_corr_exception_rows)
-                with open(out_path, "rb") as f:
-                    excel_data = f.read()
+                    # Tous les correspondants: deux fichiers séparés (entrants + sortants)
+                    _is_eastnet_single = (
+                        direction == "eastnet_extraction"
+                        and eastnet_sub_mode in ("rje_incoming_mode1", "rje_outgoing_mode2")
+                    )
+                    if direction in ("excel_extraction", "eastnet_extraction"):
+                        if _is_eastnet_single:
+                            _single_dir = (
+                                "outgoing" if eastnet_sub_mode == "rje_outgoing_mode2" else "incoming"
+                            )
+                            out_path = create_workbook(
+                                rows, temp_outdir, direction=_single_dir,
+                                beaccmcx091_rows=beaccmcx091_rows,
+                                exception_323201_rows=exception_323201_rows if _single_dir == "incoming" else None,
+                                other_exceptions_rows=other_exceptions_rows,
+                                banque_de_france_rows=banque_de_france_rows,
+                                forex_rows=forex_rows,
+                                bdf_corr_exception_rows=[]
+                            )
+                        elif direction == "eastnet_extraction":
+                            # Récupérer les listes entrants/sortants stockées en session
+                            rows_in = st.session_state.get("rje_incoming_rows", [])
+                            rows_out = st.session_state.get("rje_outgoing_rows", [])
+                            # Les catégories d'exception ne sont pas séparées par direction dans eastnet
+                            # → on les met toutes côté entrant pour la cohérence
+                            beac_in, beac_out = beaccmcx091_rows, []
+                            exc_in, exc_out = other_exceptions_rows, []
+                            forex_in, forex_out = forex_rows, []
+                            bdf_in, bdf_out = banque_de_france_rows, []
+                            bdf_corr_in, bdf_corr_out = bdf_corr_exception_rows, []
+                            exc_323201_in = exception_323201_rows
+                        else:
+                            def _split_by_direction(row_list):
+                                incoming = [r for r in row_list if r.get("direction") == "incoming"]
+                                outgoing = [r for r in row_list if r.get("direction") == "outgoing"]
+                                return incoming, outgoing
+                            rows_in, rows_out = _split_by_direction(rows)
+                            beac_in, beac_out = _split_by_direction(beaccmcx091_rows)
+                            exc_in, exc_out = _split_by_direction(other_exceptions_rows)
+                            forex_in, forex_out = _split_by_direction(forex_rows)
+                            bdf_in, bdf_out = _split_by_direction(banque_de_france_rows)
+                            bdf_corr_in, bdf_corr_out = _split_by_direction(bdf_corr_exception_rows)
+                            exc_323201_in = None
+                        
+                        if _is_eastnet_single:
+                            dir_label_in = None
+                            dir_label_out = None
+                        else:
+                            dir_label_in = "eastnet_entrant" if direction == "eastnet_extraction" else "excel_extraction_entrant"
+                            dir_label_out = "eastnet_sortant" if direction == "eastnet_extraction" else "excel_extraction_sortant"
+                        
+                        if not _is_eastnet_single:
+                            # Fichier entrants
+                            out_path_in = create_workbook(
+                                rows_in, temp_outdir, direction=dir_label_in,
+                                beaccmcx091_rows=beac_in,
+                                exception_323201_rows=exc_323201_in,
+                                other_exceptions_rows=exc_in,
+                                banque_de_france_rows=bdf_in, forex_rows=forex_in,
+                                bdf_corr_exception_rows=bdf_corr_in
+                            )
+                            # Fichier sortants
+                            out_path_out = create_workbook(
+                                rows_out, temp_outdir, direction=dir_label_out,
+                                beaccmcx091_rows=beac_out, exception_323201_rows=None,
+                                other_exceptions_rows=exc_out,
+                                banque_de_france_rows=bdf_out, forex_rows=forex_out,
+                                bdf_corr_exception_rows=bdf_corr_out
+                            )
+                        
+                        if not _is_eastnet_single:
+                            # Lire les deux fichiers
+                            import zipfile, io
+                            zip_buffer = io.BytesIO()
+                            with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                                zf.write(out_path_in, out_path_in.name)
+                                zf.write(out_path_out, out_path_out.name)
+                            zip_buffer.seek(0)
+                        
+                        if not _is_eastnet_single:
+                            # Stocker les deux fichiers individuellement pour le téléchargement
+                            with open(out_path_in, "rb") as f:
+                                excel_data_in = f.read()
+                            with open(out_path_out, "rb") as f:
+                                excel_data_out = f.read()
+                        
+                        if not _is_eastnet_single:
+                            _corr_label = rje_correspondant if direction == "eastnet_extraction" else excel_correspondant
+                            st.session_state.excel_data = zip_buffer.getvalue()
+                            st.session_state.excel_filename = f"swift_extraction_{_corr_label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                            st.session_state.excel_data_entrant = excel_data_in
+                            st.session_state.excel_filename_entrant = out_path_in.name
+                            st.session_state.excel_data_sortant = excel_data_out
+                            st.session_state.excel_filename_sortant = out_path_out.name
+                            out_path = out_path_in  # Pour la compatibilité
+                    else:
+                        out_path = create_workbook(rows, temp_outdir, direction=direction, beaccmcx091_rows=beaccmcx091_rows, exception_323201_rows=exception_323201_rows, other_exceptions_rows=other_exceptions_rows, banque_de_france_rows=banque_de_france_rows, forex_rows=forex_rows, bdf_corr_exception_rows=bdf_corr_exception_rows)
                 
-                # Stocker les données dans session_state pour persister après téléchargement
-                st.session_state.excel_data = excel_data
-                st.session_state.excel_filename = out_path.name
+                # Lecture du fichier output (si pas déjà fait pour le cas CITI 2 fichiers)
+                if not st.session_state.get('excel_data'):
+                    with open(out_path, "rb") as f:
+                        excel_data = f.read()
+                    
+                    # Stocker les données dans session_state pour persister après téléchargement
+                    st.session_state.excel_data = excel_data
+                    st.session_state.excel_filename = out_path.name
+                
                 st.session_state.extraction_results = {
                     'rows': rows,
                     'beaccmcx091_rows': beaccmcx091_rows,
@@ -774,7 +1534,7 @@ if run_button:
                     pass
         
         else:
-            st.warning("⚠️ Aucun résultat extrait. Vérifiez le format des PDFs.")
+            st.warning("⚠️ Aucun résultat extrait. Vérifiez le format des fichiers.")
         
         # Show errors
         if errors:
@@ -982,80 +1742,122 @@ Cordialement"""
     # Bouton de téléchargement persistant
     st.markdown("---")
     st.markdown("### 💾 Téléchargement")
-    st.download_button(
-        label="⬇️ Télécharger le fichier Excel",
-        data=st.session_state.excel_data,
-        file_name=st.session_state.excel_filename,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        type="primary"
-    )
-    st.success(f"✅ Workbook prêt: {st.session_state.excel_filename}")
+    
+    # Si on a deux fichiers (entrants + sortants), proposer deux boutons
+    if st.session_state.get('excel_data_entrant') and st.session_state.get('excel_data_sortant'):
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            st.download_button(
+                label="⬇️ Télécharger ENTRANTS",
+                data=st.session_state.excel_data_entrant,
+                file_name=st.session_state.excel_filename_entrant,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary"
+            )
+        with col_dl2:
+            st.download_button(
+                label="⬇️ Télécharger SORTANTS",
+                data=st.session_state.excel_data_sortant,
+                file_name=st.session_state.excel_filename_sortant,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                type="primary"
+            )
+        st.success(f"✅ Deux fichiers prêts: entrants + sortants")
+    else:
+        st.download_button(
+            label="⬇️ Télécharger le fichier Excel",
+            data=st.session_state.excel_data,
+            file_name=st.session_state.excel_filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary"
+        )
+        st.success(f"✅ Workbook prêt: {st.session_state.excel_filename}")
     
     # Aperçu de toutes les feuilles du fichier Excel
     st.markdown("---")
     st.markdown("### 📑 Aperçu de toutes les feuilles du fichier Excel")
-    try:
-        import io
-        from openpyxl import load_workbook
-        wb_preview = load_workbook(io.BytesIO(st.session_state.excel_data), read_only=True, data_only=True)
-        sheet_names = wb_preview.sheetnames
-        
-        # Onglets pour chaque feuille
-        if len(sheet_names) > 1:
-            tabs = st.tabs(sheet_names)
-            for tab, sheet_name in zip(tabs, sheet_names):
-                with tab:
-                    ws = wb_preview[sheet_name]
-                    sheet_data = []
-                    headers = None
-                    for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
-                        # Ignorer la ligne "⬅ Retour au summary" et les lignes vides
-                        row_str = " ".join(str(c) for c in row if c is not None)
-                        if "Retour au summary" in row_str:
-                            continue
-                        if all(c is None for c in row):
-                            continue
-                        if headers is None:
-                            raw_headers = [str(c) if c is not None else "" for c in row]
-                            # Dé-dupliquer les en-têtes (ajouter _1, _2... si nécessaire)
-                            seen = {}
-                            deduped = []
-                            for h in raw_headers:
-                                if h in seen:
-                                    seen[h] += 1
-                                    deduped.append(f"{h}_{seen[h]}" if h else f"col_{seen[h]}")
-                                else:
-                                    seen[h] = 0
-                                    deduped.append(h)
-                            headers = deduped
-                        else:
-                            sheet_data.append(row)
-                    
-                    if headers and sheet_data:
-                        df_sheet = pd.DataFrame(sheet_data, columns=headers)
-                        # Formater les montants si la colonne existe
-                        if "montant" in df_sheet.columns:
-                            try:
-                                df_sheet["montant"] = df_sheet["montant"].apply(
-                                    lambda x: ("{:,}".format(x)).replace(",", " ") if pd.notnull(x) and isinstance(x, (int, float)) else x
+    
+    # Déterminer quels fichiers afficher (2 fichiers entrant/sortant ou fichier unique)
+    preview_files = []
+    if st.session_state.get('excel_data_entrant') and st.session_state.get('excel_data_sortant'):
+        preview_files.append(("📥 Entrants", st.session_state.excel_data_entrant))
+        preview_files.append(("📤 Sortants", st.session_state.excel_data_sortant))
+    else:
+        preview_files.append(("Résultat", st.session_state.excel_data))
+    
+    for preview_label, preview_data in preview_files:
+        if len(preview_files) > 1:
+            st.markdown(f"#### {preview_label}")
+        try:
+            import io
+            from openpyxl import load_workbook
+            wb_preview = load_workbook(io.BytesIO(preview_data), read_only=True, data_only=True)
+            sheet_names = wb_preview.sheetnames
+            
+            # Onglets pour chaque feuille
+            if len(sheet_names) > 1:
+                tabs = st.tabs(sheet_names)
+                for tab, sheet_name in zip(tabs, sheet_names):
+                    with tab:
+                        ws = wb_preview[sheet_name]
+                        sheet_data = []
+                        headers = None
+                        for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
+                            # Ignorer la ligne "⬅ Retour au summary" et les lignes vides
+                            row_str = " ".join(str(c) for c in row if c is not None)
+                            if "Retour au summary" in row_str:
+                                continue
+                            if all(c is None for c in row):
+                                continue
+                            if headers is None:
+                                raw_headers = [str(c) if c is not None else "" for c in row]
+                                # Dé-dupliquer les en-têtes (ajouter _1, _2... si nécessaire)
+                                seen = {}
+                                deduped = []
+                                for h in raw_headers:
+                                    if h in seen:
+                                        seen[h] += 1
+                                        deduped.append(f"{h}_{seen[h]}" if h else f"col_{seen[h]}")
+                                    else:
+                                        seen[h] = 0
+                                        deduped.append(h)
+                                headers = deduped
+                            else:
+                                sheet_data.append(row)
+                        
+                        if headers and sheet_data:
+                            df_sheet = pd.DataFrame(sheet_data, columns=headers)
+                            # Formater les montants si la colonne existe
+                            if "montant" in df_sheet.columns:
+                                try:
+                                    df_sheet["montant"] = df_sheet["montant"].apply(
+                                        lambda x: ("{:,}".format(x)).replace(",", " ") if pd.notnull(x) and isinstance(x, (int, float)) else x
+                                    )
+                                except Exception:
+                                    pass
+                            # Forcer toutes les colonnes en string pour éviter les ArrowTypeError
+                            # de pyarrow sur les colonnes à types mixtes (None / float / int / str)
+                            for _col in df_sheet.columns:
+                                df_sheet[_col] = df_sheet[_col].apply(
+                                    lambda v: "" if v is None else (str(v) if not isinstance(v, str) else v)
                                 )
-                            except Exception:
-                                pass
-                        st.dataframe(df_sheet, use_container_width=True, height=300)
-                        st.caption(f"📊 {len(sheet_data)} ligne(s)")
-                    elif headers:
-                        st.info("Feuille vide (en-têtes uniquement)")
-                    else:
-                        st.info("Feuille vide")
-        wb_preview.close()
-    except Exception as e:
-        st.warning(f"⚠️ Impossible de charger l'aperçu multi-feuilles: {e}")
+                            st.dataframe(df_sheet, use_container_width=True, height=300)
+                            st.caption(f"📊 {len(sheet_data)} ligne(s)")
+                        elif headers:
+                            st.info("Feuille vide (en-têtes uniquement)")
+                        else:
+                            st.info("Feuille vide")
+            wb_preview.close()
+        except Exception as e:
+            st.warning(f"⚠️ Impossible de charger l'aperçu multi-feuilles: {e}")
 
 # Footer
 st.markdown("---")
 st.markdown("""
     <div style='text-align: center; color: gray; font-size: 0.8em;'>
-        PDF SWIFT Extractor | Déployé sur Hugging Face Spaces
+        PDF & Excel SWIFT Extractor | Déployé sur Hugging Face Spaces
     </div>
 """, unsafe_allow_html=True)
