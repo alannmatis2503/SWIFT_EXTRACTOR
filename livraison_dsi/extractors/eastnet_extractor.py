@@ -695,6 +695,10 @@ def _extract_mt202_from_tags(tags: Dict[str, str], verbose_text: str, direction:
                 m_bic = _BIC_LOOSE_RE.search(f58a_val)
                 if m_bic and m_bic.group(1).upper() not in _get_false_bic_words():
                     row['code_donneur_dordre'] = m_bic.group(1).upper()
+                    # Le pays a pu être pré-rempli depuis F52A (BEACCMCX091 → SCX) ;
+                    # on force la réévaluation à partir du nouveau code donneur
+                    # (BIC du bénéficiaire) pour éviter SCX systématique.
+                    row['pays_iso3'] = None
         else:
             # Extraction basique F58A
             f58a_val = tags.get('58A', '') or tags.get('58D', '')
@@ -1273,10 +1277,31 @@ def _process_single_message(msg_text: str, source_file: str, msg_idx: int,
             return row, direction, 'banque_de_france'
     
     # ── Règle forex (MT910 entrants) ──
+    # Règle 1 : code_donneur_dordre dans la liste forex (BIC8 ou BIC complet).
+    # Règle 2 : pour CITIUS33 + USD, fallback sur F50A — si l'un des codes forex
+    # apparaît dans la valeur brute de F50A, on classe en forex. Cf. mt_multi.py
+    # L1888-1906 (extract_msg_block).
     if mt_type == '910' and direction == 'incoming':
         code_d = (row.get('code_donneur_dordre') or '').upper()
         if code_d[:8] in forex_codes or code_d in forex_codes:
             return row, direction, 'forex'
+
+        corr_up = (correspondant or row.get('correspondant') or sender_bic or '').upper()
+        devise_up = (row.get('devise') or '').upper()
+        if forex_codes and corr_up.startswith('CITIUS33') and devise_up == 'USD':
+            f50a_upper = (tags.get('50A') or '').upper()
+            if f50a_upper:
+                for fx_code in forex_codes:
+                    if fx_code and fx_code in f50a_upper:
+                        existing = row.get('commentaires')
+                        row['commentaires'] = (
+                            f"{existing} forex" if existing else 'forex'
+                        )
+                        logger.debug(
+                            "eastnet: msg %d MT910 entrant CITIUS33/USD classé forex "
+                            "via F50A (code %s)", msg_idx, fx_code,
+                        )
+                        return row, direction, 'forex'
 
     # ── Règle "exception BC" (MT910 entrants Standard) ──
     # Pour les MT910 entrants depuis Standard Chartered (SCBLGB2LXXX), si la
