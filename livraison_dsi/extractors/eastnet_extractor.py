@@ -55,6 +55,7 @@ try:
         _check_eur_exception,
         _check_nivellement_exception,
         _check_salle_des_marches_exception,
+        _check_f21_bc_mt202_outgoing,
         _should_reject_mt103,
         _citius33_f58a_fallback,
         _bdf_f58a_fallback,
@@ -1238,22 +1239,33 @@ def _process_single_message(msg_text: str, source_file: str, msg_idx: int,
         row['commentaires'] = f"{comment} / {niv_exc}" if comment else niv_exc
         return row, direction, 'other_exception'
     
-    # ── Règle salle des marchés (BC dans F21) ──
+    # ── Règle §10.3 — BC dans F21 (MT202 sortant) → salle des marchés ──
+    # Si la référence d'origine F21 contient "BC", le message est routé vers
+    # other_exceptions avec le commentaire "opération salle des marchés".
     # §11.2 — Annulation : si receiver est SCBLGB2LXXX ou CITIGB2LXXX,
-    # l'exception BC est annulée (message redevient normal, sans commentaire
-    # "opération salle des marchés"). Cf. mt_multi.py L1772-1777.
+    # l'exception est annulée (message redevient normal, sans commentaire).
+    if mt_type == '202' and direction == 'outgoing':
+        if _check_f21_bc_mt202_outgoing(verbose_text):
+            _receiver_up = (receiver_bic or '').upper()
+            _cancel_bc = _receiver_up in ('SCBLGB2LXXX', 'CITIGB2LXXX')
+            if not _cancel_bc:
+                comment = row.get('commentaires')
+                bc_label = 'opération salle des marchés'
+                row['commentaires'] = f"{comment} / {bc_label}" if comment else bc_label
+                return row, direction, 'other_exception'
+            logger.debug(
+                "eastnet: MT202 sortant msg %d — exception BC F21 annulée (receiver=%s)",
+                msg_idx, _receiver_up,
+            )
+
+    # ── Règle salle des marchés (MT910 entrant + IBAN FR… dans F25P) ──
+    # Règle minoritaire issue de mt_multi.py L747 (`_check_salle_des_marches_exception`).
+    # Pas d'annulation prévue.
     sdm_exc = _check_salle_des_marches_exception(row, verbose_text, direction)
     if sdm_exc:
-        _receiver_up = (receiver_bic or '').upper()
-        _cancel_bc = _receiver_up in ('SCBLGB2LXXX', 'CITIGB2LXXX')
-        if not _cancel_bc:
-            comment = row.get('commentaires')
-            row['commentaires'] = f"{comment} / {sdm_exc}" if comment else sdm_exc
-            return row, direction, 'other_exception'
-        logger.debug(
-            "eastnet: MT202 sortant msg %d — exception BC annulée (receiver=%s)",
-            msg_idx, _receiver_up,
-        )
+        comment = row.get('commentaires')
+        row['commentaires'] = f"{comment} / {sdm_exc}" if comment else sdm_exc
+        return row, direction, 'other_exception'
     
     # ── Règle MT103 USD rejet vers BANQUE DE FRANCE ──
     if mt_type == '103' and direction == 'incoming':
