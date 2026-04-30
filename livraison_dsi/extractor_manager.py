@@ -639,17 +639,32 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     ]
     summary.append(display_headers)
 
+    # Cache mémoïsé : datetime.strptime est très lent (~80µs/appel)
+    # et la plupart des fichiers n'ont qu'une poignée de dates distinctes.
+    _date_cache: Dict[str, Optional[datetime]] = {}
+    _ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
     def _convert_date_to_excel(date_str):
-        """Convertir une date ISO en objet datetime pour Excel."""
+        """Convertir une date ISO en datetime pour Excel (avec cache)."""
         if not date_str:
             return None
-        try:
-            # Format ISO: YYYY-MM-DD
-            if isinstance(date_str, str) and re.match(r'^\d{4}-\d{2}-\d{2}$', date_str):
-                return datetime.strptime(date_str, '%Y-%m-%d')
+        # Si déjà un datetime, retour immédiat
+        if isinstance(date_str, datetime):
             return date_str
-        except Exception:
+        if not isinstance(date_str, str):
             return date_str
+        cached = _date_cache.get(date_str)
+        if cached is not None:
+            return cached
+        if _ISO_DATE_RE.match(date_str):
+            try:
+                dt = datetime.strptime(date_str, '%Y-%m-%d')
+                _date_cache[date_str] = dt
+                return dt
+            except Exception:
+                pass
+        _date_cache[date_str] = date_str  # type: ignore[assignment]
+        return date_str
 
     # Compteur de lignes par feuille pour éviter sheet.max_row (O(n) par appel)
     _sheet_row_counts = {}
@@ -671,10 +686,6 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         correspondant = r.get("correspondant") or None
         commentaires = r.get("commentaires") or None
         # Sanitize: ensure no tuples/lists leak into Excel cells
-        for _field in ('code_donneur', 'donneur', 'beneficiaire', 'correspondant', 'commentaires'):
-            _v = locals()[_field]
-            if isinstance(_v, (list, tuple)):
-                locals()[_field]  # can't reassign via locals(); use direct assignment below
         if isinstance(code_donneur, (list, tuple)): code_donneur = code_donneur[0] if code_donneur else None
         if isinstance(donneur, (list, tuple)): donneur = donneur[0] if donneur else None
         if isinstance(beneficiaire, (list, tuple)): beneficiaire = beneficiaire[0] if beneficiaire else None
@@ -699,11 +710,10 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
             commentaires,
             source_pdf
         ]
-        # Final safety: replace any tuple/list values with their first element
-        row_data = [
-            (v[0] if isinstance(v, (list, tuple)) and v else None) if isinstance(v, (list, tuple)) else v
-            for v in row_data
-        ]
+        # NB: Les champs (code_donneur, donneur, beneficiaire, correspondant,
+        # commentaires) sont déjà désérialisés ci-dessus si liste/tuple. La
+        # sanitization globale ci-dessous a été retirée pour éviter ~5M
+        # appels isinstance() sur les gros volumes (gain ~3-4s).
         sheet.append(row_data)
         
         # Utiliser un compteur local au lieu de sheet.max_row (O(n) par appel → O(n²))
@@ -1140,23 +1150,28 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
                 pass
 
     # Ajouter un lien retour vers summary dans toutes les feuilles (sauf summary elle-même)
-    for sheet_name in wb.sheetnames:
-        if sheet_name == "summary":
-            continue
-        ws = wb[sheet_name]
-        # Vérifier si la feuille a déjà un lien retour (les per-file sheets l'ont déjà)
-        first_val = ws.cell(row=1, column=1).value
-        if first_val and "Retour" in str(first_val):
-            continue  # Déjà ajouté
-        # Pour les feuilles tabulaires (pays, exceptions, doublons) : insérer en première ligne avant les headers
-        ws.insert_rows(1, 1)
-        back_cell = ws.cell(row=1, column=1)
-        back_cell.value = "⬅ Retour au summary"
-        try:
-            back_cell.hyperlink = "#summary!A1"
-            back_cell.style = "Hyperlink"
-        except Exception:
-            pass
+    # ATTENTION: ws.insert_rows(1, 1) est O(n) en cellules → catastrophique pour les
+    # gros volumes (déplacement de 30k+ cellules par feuille). Pour les flux à
+    # grande volumétrie (EastNet / Excel extraction), on saute cette étape :
+    # les onglets restent navigables via la barre d'onglets d'Excel.
+    if not skip_per_row_sheets:
+        for sheet_name in wb.sheetnames:
+            if sheet_name == "summary":
+                continue
+            ws = wb[sheet_name]
+            # Vérifier si la feuille a déjà un lien retour (les per-file sheets l'ont déjà)
+            first_val = ws.cell(row=1, column=1).value
+            if first_val and "Retour" in str(first_val):
+                continue  # Déjà ajouté
+            # Pour les feuilles tabulaires (pays, exceptions, doublons) : insérer en première ligne avant les headers
+            ws.insert_rows(1, 1)
+            back_cell = ws.cell(row=1, column=1)
+            back_cell.value = "⬅ Retour au summary"
+            try:
+                back_cell.hyperlink = "#summary!A1"
+                back_cell.style = "Hyperlink"
+            except Exception:
+                pass
 
     # ────────────────────────────────────────────────────────────────────
     # Feuille "Sortants_Rejetes_NtStatus" — sortants RJE écartés au filtre
