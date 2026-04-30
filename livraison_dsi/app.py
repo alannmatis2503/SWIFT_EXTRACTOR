@@ -881,6 +881,7 @@ if run_button:
                 from extractors.eastnet_extractor import (
                     extract_from_rje_files as _ee_extract,
                     extract_mt900_from_rje_files as _ee_mt900_extract,
+                    dedupe_mt900_rows as _ee_mt900_dedupe,
                 )
 
                 total_files = len(uploaded_rje_sortants_files) + len(uploaded_rje_mt900_files)
@@ -963,6 +964,17 @@ if run_button:
                             tmp_mt900_paths, correspondant=rje_correspondant,
                             xlsx_path=xlsx_bic_path
                         )
+
+                        # 2bis) Dédoublonner les MT900 retransmis par SWIFT FIN
+                        # (trailer {DLM:}, même MIR). Les copies écartées sont
+                        # listées dans la feuille MT900_Doublons du workbook.
+                        all_mt900, duplicate_mt900 = _ee_mt900_dedupe(all_mt900)
+                        st.session_state['duplicate_mt900_rows'] = duplicate_mt900
+                        if duplicate_mt900:
+                            st.warning(
+                                f"⚠️ {len(duplicate_mt900)} MT900 doublon(s) réseau (trailer DLM / "
+                                f"même MIR) écarté(s) avant matching — voir feuille MT900_Doublons."
+                            )
 
                         # 3) Matcher MT900 ↔ transferts via F21 = F20
                         matched_mt900, suspens, exception_mt900, unmatched_mt900 = (
@@ -1382,6 +1394,7 @@ if run_button:
                     suspens_rows = st.session_state.get('suspens_rows', [])
                     exception_mt900_rows = st.session_state.get('exception_mt900_rows', [])
                     unmatched_mt900_rows = st.session_state.get('unmatched_mt900_rows', [])
+                    duplicate_mt900_rows = st.session_state.get('duplicate_mt900_rows', [])
                     
                     # Convertir les dates en string pour le workbook
                     date_start_str = date_debut.strftime("%Y-%m-%d") if date_debut else None
@@ -1398,6 +1411,7 @@ if run_button:
                         date_start=date_start_str, date_end=date_end_str,
                         unmatched_mt900_rows=unmatched_mt900_rows,
                         xlsx_path=str(bic_file) if bic_file.exists() else None,
+                        duplicate_mt900_rows=duplicate_mt900_rows,
                     )
                     
                     # Afficher le résumé

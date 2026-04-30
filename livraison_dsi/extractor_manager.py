@@ -1360,7 +1360,7 @@ def extract_transfer_analysis_dispatch(pdf_path: Path) -> tuple[List[Dict], List
     return [], [], {"unmapped": set(), "empty": set()}
 
 
-def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: List[Dict], exception_rows: List[Dict], out_dir: Path, date_start: str = None, date_end: str = None, unmatched_mt900_rows: List[Dict] = None, xlsx_path: Optional[str] = None) -> Path:
+def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: List[Dict], exception_rows: List[Dict], out_dir: Path, date_start: str = None, date_end: str = None, unmatched_mt900_rows: List[Dict] = None, xlsx_path: Optional[str] = None, duplicate_mt900_rows: List[Dict] = None) -> Path:
     """
     Créer un workbook Excel pour l'analyse des transferts sortants exécutés.
     
@@ -1369,6 +1369,9 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
       enrichis depuis bic_codes.xlsx via les 4 premiers caractères de related_reference
       (colonne Reglement) -> code BIC, nom institution, pays.
     - "Transferts_Executes_Matches": MT900 main rapprochés avec leur MT202/MT103 d'origine.
+    - "MT900_Doublons": MT900 retransmis par le réseau SWIFT FIN (trailer DLM,
+      même MIR) qui ont été écartés avant matching pour éviter les doubles
+      comptages. Une ligne par copie écartée, avec référence du message conservé.
     - "MT900_non_rapproches": MT900 sans correspondant MT103/MT202.
     - "Suspens": MT202/MT103 sans confirmation MT900.
     - Feuilles d'exception (BEACCMCX091, etc.): MT900 + suspens des catégories d'exception.
@@ -1672,7 +1675,39 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
             matches_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
     except Exception:
         pass
-    
+
+    # Sheet 3 (NEW): MT900_Doublons — copies retransmises par SWIFT FIN (trailer
+    # {DLM:}, même MIR) écartées avant le matching pour éviter les doubles
+    # comptages. Le message conservé reste dans Transferts_Executes ; les copies
+    # écartées sont listées ici avec un pointeur vers la référence retenue.
+    if duplicate_mt900_rows:
+        dup_headers = [
+            "type_MT", "reference", "related_reference", "date_reference",
+            "devise", "montant", "correspondant", "source_pdf",
+            "reference_conservee", "source_conservee", "DLM", "cle_dedup",
+        ]
+        dup_sheet = wb.create_sheet(title="MT900_Doublons")
+        dup_sheet.append(dup_headers)
+        for r in duplicate_mt900_rows:
+            date_ref = _convert_date_to_excel(r.get("date_reference"))
+            dup_sheet.append([
+                r.get("type_MT"),
+                r.get("reference"),
+                r.get("related_reference"),
+                date_ref,
+                r.get("devise"),
+                r.get("montant"),
+                r.get("correspondant"),
+                r.get("source_pdf"),
+                r.get("_duplicate_of_reference"),
+                r.get("_duplicate_of_source"),
+                "OUI" if r.get("_is_dlm") else "NON",
+                r.get("_dedupe_key"),
+            ])
+            if date_ref and isinstance(date_ref, datetime):
+                dup_sheet.cell(row=dup_sheet.max_row, column=4).number_format = 'DD/MM/YYYY'
+        _adjust_widths(dup_sheet, len(dup_headers))
+
     # Sheet 2: MT900_non_matches (MT900 sans correspondant MT103/MT202)
     if unmatched_mt900_rows:
         unmatched_headers = [

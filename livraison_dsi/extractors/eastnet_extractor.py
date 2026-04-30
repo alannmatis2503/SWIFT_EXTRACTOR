@@ -234,9 +234,108 @@ _BEAC_DN_BIC11 = frozenset({
 # Extraction du BIC destinataire (block 2 pour O, champ header pour I)
 _BLOCK2_DEST_BIC_RE = re.compile(r'\{2:[IO]\d{3}([A-Z]{4}[A-Z]{2}[A-Z0-9]{2,5})', re.I)
 
+# Extraction du contenu intégral du bloc 2 (pour récupérer le MIR/MOR)
+_BLOCK2_FULL_RE = re.compile(r'\{2:([^}]+)\}')
+
+# Détection du trailer {DLM:...} (Delayed Message — retransmission par SWIFT FIN)
+_DLM_TRAILER_RE = re.compile(r'\{DLM[:\}]', re.I)
+
 # Extraction block 4 (tout entre {4:\n et \n-} ou -})
 _BLOCK4_RE = re.compile(r'\{4:\r?\n(.*?)\r?\n-\}', re.DOTALL)
 _BLOCK4_FALLBACK_RE = re.compile(r'\{4:(.*?)-\}', re.DOTALL)
+
+
+def _extract_mir_from_block2(block2_content: str) -> Optional[str]:
+    """
+    Extraire le MIR (Message Input Reference) depuis le contenu du bloc 2.
+
+    Format SWIFT du bloc 2 — Output (réception): O<MT:3><InputTime:4><MIR:28><OutputDate:6><OutputTime:4><Priority:1>
+    où MIR = SenderDate(6) + LT_address(12) + Session(4) + ISN(6).
+
+    Le MIR est l'identifiant unique d'un message physique sur le réseau FIN —
+    deux livraisons d'un même message (retransmission DLM) partagent le même MIR.
+
+    Pour les messages Input ({2:I...}), il n'y a pas de MIR mais on retourne None
+    (les MT900 sont toujours en Output côté BEAC).
+    """
+    if not block2_content or not block2_content.startswith('O'):
+        return None
+    if len(block2_content) < 8 + 28:
+        return None
+    return block2_content[8:8 + 28]
+
+
+def dedupe_mt900_rows(rows: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Dédoublonner une liste de MT900 issus d'un fichier RJE.
+
+    Deux MT900 sont considérés comme doublons réseau si leur MIR (28 caractères
+    extraits du bloc 2) est identique. C'est typiquement le cas lorsque SWIFT
+    FIN retransmet un message non confirmé : la copie retransmise porte le
+    trailer ``{DLM:}`` (Delayed Message) avec un ``{CHK:}`` différent mais le
+    même MIR.
+
+    Si le MIR n'est pas disponible (extraction échouée), on retombe sur une
+    clé composite ``(sender_bic, F20, F21, date+devise+montant)``.
+
+    Politique de conservation:
+        - on garde la première occurrence non DLM ;
+        - à défaut on garde la première occurrence tout court ;
+        - les autres copies sont annotées et renvoyées dans ``duplicates``.
+
+    Args:
+        rows: Liste des MT900 extraits (avec champs internes ``_mir`` et ``_is_dlm``).
+
+    Returns:
+        ``(unique, duplicates)`` — chaque ligne de ``duplicates`` reçoit:
+            - ``_duplicate_of_reference``: F20 du message conservé,
+            - ``_duplicate_of_source``: source_pdf du message conservé,
+            - ``_dedupe_key``: MIR ou clé composite utilisée.
+    """
+    from collections import OrderedDict
+
+    groups: 'OrderedDict[Tuple, List[Dict]]' = OrderedDict()
+    for r in rows:
+        mir = r.get('_mir')
+        if mir:
+            key: Tuple = ('mir', mir)
+        else:
+            key = (
+                'comp',
+                (r.get('sender_bic') or '').upper(),
+                (r.get('reference') or '').upper(),
+                (r.get('related_reference') or '').upper(),
+                str(r.get('date_reference') or ''),
+                (r.get('devise') or '').upper(),
+                str(r.get('montant') or ''),
+            )
+        groups.setdefault(key, []).append(r)
+
+    unique: List[Dict] = []
+    duplicates: List[Dict] = []
+    for key, lst in groups.items():
+        if len(lst) == 1:
+            unique.append(lst[0])
+            continue
+        non_dlm = [r for r in lst if not r.get('_is_dlm')]
+        kept = non_dlm[0] if non_dlm else lst[0]
+        unique.append(kept)
+        key_str = key[1] if key[0] == 'mir' else '|'.join(str(x) for x in key[1:])
+        for r in lst:
+            if r is kept:
+                continue
+            dup = dict(r)
+            dup['_duplicate_of_reference'] = kept.get('reference')
+            dup['_duplicate_of_source'] = kept.get('source_pdf')
+            dup['_dedupe_key'] = key_str
+            duplicates.append(dup)
+
+    if duplicates:
+        logger.info(
+            "dedupe_mt900_rows: %d MT900 en entrée → %d uniques, %d doublons réseau (DLM/MIR)",
+            len(rows), len(unique), len(duplicates),
+        )
+    return unique, duplicates
 
 # Tags SWIFT bruts — ex: :20:, :32A:, :52A:, etc.
 _SWIFT_TAG_RE = re.compile(r':([0-9]{2}[A-Z]?):', re.MULTILINE)
@@ -1190,6 +1289,12 @@ def extract_mt900_from_rje_file(rje_path: Path,
             row = _extract_mt900_from_tags(tags, source_label, sender_bic or '', receiver_bic or '')
             row['correspondant'] = correspondant
             row['direction'] = direction or 'incoming'
+            # ── Métadonnées réseau pour dédup MIR/DLM ──
+            m_b2 = _BLOCK2_FULL_RE.search(msg_text)
+            block2_raw = m_b2.group(1) if m_b2 else ''
+            row['_block2'] = block2_raw
+            row['_mir'] = _extract_mir_from_block2(block2_raw)
+            row['_is_dlm'] = bool(_DLM_TRAILER_RE.search(msg_text))
             rows.append(row)
         except Exception as e:
             logger.warning("eastnet MT900: erreur message %d: %s", idx, e)
