@@ -1602,9 +1602,30 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
     ]
     all_main_mt900 = list(main_mt900_matched) + list(unmatched_mt900_rows or [])
 
+    # Partition: les MT900 dont related_reference est vide ou dont les 4 premiers
+    # caractères ne mappent pas un code Reglement connu de bic_codes.xlsx ne sont
+    # PAS placés dans Transferts_Executes (rien à enrichir, donneur inconnu).
+    # Ils sont reroutés dans MT900_non_rapproches avec un commentaire explicite.
+    exec_ineligible_mt900: List[Dict] = []
+
     for r in all_main_mt900:
-        date_ref = _convert_date_to_excel(r.get("date_reference"))
         enr = _enrich_from_related_reference(r)
+        if not enr["code_bic"]:
+            # Pas de F21, F21 non numérique, ou code Reglement absent du référentiel
+            rr = (r.get("related_reference") or "").strip()
+            if not rr:
+                reason = "MT900 sans reference d'origine (F21 absent)"
+            elif not enr["code_reglement"] or not (enr["code_reglement"] or "").isdigit():
+                reason = f"Reference d'origine non exploitable (F21={rr!r})"
+            else:
+                reason = f"Code Reglement {enr['code_reglement']} introuvable dans bic_codes.xlsx"
+            r_copy = dict(r)
+            existing = r_copy.get("commentaires")
+            r_copy["commentaires"] = f"{existing} | {reason}" if existing else reason
+            exec_ineligible_mt900.append(r_copy)
+            continue
+
+        date_ref = _convert_date_to_excel(r.get("date_reference"))
         row_data = [
             r.get("type_MT"),
             r.get("reference"),
@@ -1709,7 +1730,10 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
         _adjust_widths(dup_sheet, len(dup_headers))
 
     # Sheet 2: MT900_non_matches (MT900 sans correspondant MT103/MT202)
-    if unmatched_mt900_rows:
+    # On y inclut aussi les MT900 écartés de Transferts_Executes faute de
+    # référence d'origine exploitable (F21 absent ou code Reglement inconnu).
+    effective_unmatched = list(unmatched_mt900_rows or []) + list(exec_ineligible_mt900)
+    if effective_unmatched:
         unmatched_headers = [
             "type_MT",
             "reference",
@@ -1724,7 +1748,7 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
         unmatched_sheet = wb.create_sheet(title="MT900_non_rapproches")
         unmatched_sheet.append(unmatched_headers)
         
-        for r in unmatched_mt900_rows:
+        for r in effective_unmatched:
             date_ref = _convert_date_to_excel(r.get("date_reference"))
             row_data = [
                 r.get("type_MT"),
