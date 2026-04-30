@@ -1,38 +1,11 @@
+# backend/app/extractors/mt202.py
 """
-=============================================================================
- Extracteur MT202 — Virements interbancaires
-=============================================================================
- Ce module extrait les données structurées depuis un message SWIFT MT202
- (virement de banque à banque) contenu dans un fichier PDF.
-
- Un message MT202 est composé de « champs » (fields) normalisés SWIFT :
-   - F20  : Référence de la transaction (numéro unique)
-   - F21  : Référence d'origine (lien avec un message antérieur)
-   - F32A : Date valeur + Devise + Montant
-   - F52A : Institution du donneur d'ordre (code BIC)
-   - F58A : Institution bénéficiaire (code BIC)
-   - F72  : Informations complémentaires (commentaires)
-
- Ce module fournit également des fonctions utilitaires réutilisées par
- les autres extracteurs (mt103, mt910, mt900) :
-   - get_field_block(text, label)  : Extraire un bloc de champ SWIFT du texte
-   - parse_amount(s)               : Convertir une chaîne montant → float
-   - parse_date_YYMMDD(s)          : Convertir date YYMMDD → ISO (YYYY-MM-DD)
-   - extract_text_from_pdf(path)   : Extraction texte depuis PDF (PyMuPDF/pdfplumber)
-   - extract_transaction_reference(): Référence robuste multi-formats
-   - detect_country_from_text()    : Détection pays CEMAC dans le texte
-
- Variante 202.COV :
-   Le message MT202.COV (« Cover ») a la même structure mais inclut des
-   informations supplémentaires sur le donneur d'ordre final. Le type_MT
-   sera alors « fin.202.COV ».
-
- Dépendances :
-   - pdfplumber : extraction texte PDF (fallback)
-   - PyMuPDF (fitz) : extraction texte PDF rapide (~50x plus rapide)
-   - python-dateutil : parsing de dates flexibles
-   - bic_utils : résolution code BIC → nom de banque
-============================================================================="""
+Extracteur MT202 (text-level). Fournit :
+- helpers utilitaires (get_field_block, parse_amount, parse_date_YYMMDD, etc.)
+- parse_f32a, extract_transaction_reference (robuste)
+- expose aussi parse_reference pour compatibilité avec mt103
+- utilise bic_utils.get_donneur_from_f52 pour la valeur donneur_dordre (CODE/NAME)
+"""
 
 import re
 from datetime import datetime
@@ -85,12 +58,14 @@ VALID_CURRENCIES = {
 }
 
 CEMAC_MAP = {
-    "CM": "CMR", "CMR": "CMR", "CAMEROON": "CMR",
+    # Codes alignés sur le référentiel data/bic_codes.xlsx (CAM, CGO, GAB, TCH, GEQ, RCA)
+    # afin que les pays détectés par texte soient cohérents avec ceux issus du mapping BIC.
+    "CM": "CAM", "CMR": "CAM", "CAM": "CAM", "CAMEROON": "CAM",
     "GA": "GAB", "GAB": "GAB", "GABON": "GAB",
-    "TD": "TCD", "TCD": "TCD", "CHAD": "TCD",
-    "CG": "COG", "COG": "COG", "CONGO": "COG",
-    "GQ": "GNQ", "GNQ": "GNQ", "EQUATORIAL GUINEA": "GNQ",
-    "CF": "CAF", "CAF": "CAF", "CENTRAL AFRICAN REPUBLIC": "CAF"
+    "TD": "TCH", "TCD": "TCH", "TCH": "TCH", "CHAD": "TCH",
+    "CG": "CGO", "COG": "CGO", "CGO": "CGO", "CONGO": "CGO",
+    "GQ": "GEQ", "GNQ": "GEQ", "GEQ": "GEQ", "EQUATORIAL GUINEA": "GEQ",
+    "CF": "RCA", "CAF": "RCA", "RCA": "RCA", "CENTRAL AFRICAN REPUBLIC": "RCA",
 }
 
 # Pre-compiled regex patterns for performance optimization
