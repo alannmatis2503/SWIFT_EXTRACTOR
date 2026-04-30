@@ -1547,8 +1547,10 @@ if run_button:
                     )
                     if direction in ("excel_extraction", "eastnet_extraction"):
                         if _is_eastnet_single:
+                            # Préfixé "eastnet_" pour activer skip_per_row_sheets dans create_workbook
+                            # (sinon explosion combinatoire : 1 feuille par message × 30k+ messages)
                             _single_dir = (
-                                "outgoing" if eastnet_sub_mode == "rje_outgoing_mode2" else "incoming"
+                                "eastnet_outgoing" if eastnet_sub_mode == "rje_outgoing_mode2" else "eastnet_incoming"
                             )
                             out_path = create_workbook(
                                 rows, temp_outdir, direction=_single_dir,

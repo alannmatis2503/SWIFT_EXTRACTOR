@@ -816,7 +816,14 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
                 all_countries.add("Operations_BEAC" if country == "BEAC" else country)
     
     # Skip per-row detail sheets for Excel extraction mode (too many rows)
-    skip_per_row_sheets = direction.startswith("excel_extraction") or direction.startswith("eastnet_")
+    # Skip per-row detail sheets pour les modes à grande volumétrie
+    # OU pour tout volume élevé (safety-net : créer 30k+ feuilles fait O(n²)
+    # avec wb.create_sheet et Excel ne gère pas plus de ~10k onglets en pratique).
+    skip_per_row_sheets = (
+        direction.startswith("excel_extraction")
+        or direction.startswith("eastnet_")
+        or len(rows) > 500
+    )
 
     if not skip_per_row_sheets:
         # Noms de feuilles réservés (déjà utilisés par d'autres onglets)
