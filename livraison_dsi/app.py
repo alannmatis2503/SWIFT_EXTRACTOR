@@ -204,12 +204,13 @@ elif direction == "eastnet_extraction":
 
     rje_correspondant = st.radio(
         "Correspondant",
-        ("CITIUS33XXX", "CITIGB2LXXX", "BDFEFRPPXXX", "SCBLGB2LXXX"),
+        ("CITIUS33XXX", "CITIGB2LXXX", "BDFEFRPPXXX", "SCBLGB2LXXX", "FRNYUS33XXX"),
         format_func=lambda x: {
             "CITIUS33XXX": "🏦 CITI USD (CITIUS33XXX)",
             "CITIGB2LXXX": "🏦 CITI EUR (CITIGB2LXXX)",
             "BDFEFRPPXXX": "🏦 Banque de France (BDFEFRPPXXX)",
             "SCBLGB2LXXX": "🏦 Standard (SCBLGB2LXXX)",
+            "FRNYUS33XXX": "🏦 FED",
         }.get(x, x),
         horizontal=True
     )
