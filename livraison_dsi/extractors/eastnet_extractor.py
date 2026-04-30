@@ -93,6 +93,120 @@ except Exception:
 # Découpage par '$' entre blocs SWIFT
 _MSG_SPLIT_RE = re.compile(r'\$(?=\{1:)')
 
+# ── Patterns spécifiques FED (MT103 entrants FRNYUS33) ────────────────────────
+# Code Reglement BEAC dans F70/F72 au format dot: 60.311101.0.6001.0.0.0.0.0
+_FED_REGLEMENT_DOT_RE = re.compile(r'\d{2,3}\.\d{6}\.\d\.(\d{4})(?:\.\d)?')
+# Compte BEAC compact dans F59: /603111010600100000 (positions [9:13] = code)
+_FED_F59_ACCOUNT_RE = re.compile(r'/(\d{13,20})\b')
+# Indicateurs Guinée Equatoriale (espagnol + anglais)
+_FED_GEQ_KEYWORDS_RE = re.compile(
+    r'TESORO|TRESOR\s+PUBLICO|GUINEA\s+ECUATORIAL|EQUATORIAL\s+GUINEA|'
+    r'GUINEE\s+EQUATORIALE|MALABO|PUBLIC\s+TREASURY\s+OF\s+EQUATORIAL\s+GUINEA',
+    re.I
+)
+# Indicateurs Trésor Public Cameroun (FR)
+_FED_CAM_TRESOR_RE = re.compile(
+    r'TRESOR\s+PUBLIC\s+DE\s+LA\s+REPUBLIQUE\s+DU\s+CAMEROUN|'
+    r'TREASURY\s+OF\s+THE\s+REPUBLIC\s+OF\s+CAMEROON',
+    re.I
+)
+
+
+def _fed_extract_donneur_from_beneficiary(f59: str, f70: str, f72: str,
+                                          xlsx_path: Optional[str] = None
+                                          ) -> Optional[Dict[str, str]]:
+    """
+    Pour MT103 entrants FED (sender FRNYUS33), récupérer l'institution CEMAC
+    bénéficiaire du transfert (Trésor Public, banque commerciale) à partir
+    de :59:, :70: et :72:. Cette institution est traitée comme "donneur d'ordre"
+    au sens comptable BEAC (équivalent F52A pour les autres correspondants).
+
+    Stratégie:
+      1) Code Reglement format dot dans F70/F72 (ex: 60.311101.0.6001.0...)
+      2) Code Reglement aux positions [9:13] du compte F59 (format compact)
+      3) Mots-clés Guinée Équatoriale -> Trésor GEQ (code 6001) par défaut
+    """
+    if not (f59 or f70 or f72):
+        return None
+
+    code_4: Optional[str] = None
+    text_70_72 = f"{f70} {f72}".replace('\n', ' ')
+
+    # 1) Format dot dans F70/F72
+    m = _FED_REGLEMENT_DOT_RE.search(text_70_72)
+    if m:
+        code_4 = m.group(1)
+
+    # 2) Compte compact dans F59 (positions [9:13])
+    if not code_4 and f59 and HAS_BIC_UTILS:
+        for am in _FED_F59_ACCOUNT_RE.finditer(f59):
+            account = am.group(1)
+            if len(account) >= 13:
+                candidate = account[9:13]
+                try:
+                    info = bic_utils.map_reglement_code(candidate, xlsx_path=xlsx_path)
+                except Exception:
+                    info = None
+                if info:
+                    code_4 = candidate
+                    break
+
+    # 3) Mapping via colonne Reglement de bic_codes.xlsx
+    if code_4 and HAS_BIC_UTILS:
+        try:
+            info = bic_utils.map_reglement_code(code_4, xlsx_path=xlsx_path)
+        except Exception:
+            info = None
+        if info:
+            return {
+                'code': info.get('bic') or code_4,
+                'name': info.get('name'),
+                'country': info.get('country'),
+            }
+
+    # 4) Fallback mots-clés explicites par pays
+    text_all = f"{f59} {f70} {f72}"
+
+    # 4a) Trésor Public Cameroun (FR/EN explicite) -> code 1001
+    if _FED_CAM_TRESOR_RE.search(text_all):
+        if HAS_BIC_UTILS:
+            try:
+                info = bic_utils.map_reglement_code('1001', xlsx_path=xlsx_path)
+            except Exception:
+                info = None
+            if info:
+                return {
+                    'code': info.get('bic') or '1001',
+                    'name': info.get('name'),
+                    'country': info.get('country'),
+                }
+        return {
+            'code': 'DTRSCMCX',
+            'name': 'DIRECTION DU TRESOR CAMEROUN',
+            'country': 'CAM',
+        }
+
+    # 4b) Mots-clés Guinée Équatoriale (espagnol/anglais) -> Trésor GEQ (6001)
+    if _FED_GEQ_KEYWORDS_RE.search(text_all):
+        if HAS_BIC_UTILS:
+            try:
+                info = bic_utils.map_reglement_code('6001', xlsx_path=xlsx_path)
+            except Exception:
+                info = None
+            if info:
+                return {
+                    'code': info.get('bic') or '6001',
+                    'name': info.get('name'),
+                    'country': info.get('country'),
+                }
+        return {
+            'code': 'DTRSGQGQ',
+            'name': 'TRESOR DE GUINEE EQUATORIALE',
+            'country': 'GEQ',
+        }
+
+    return None
+
 # Extraction bloc 2 (direction + type MT)
 _BLOCK2_RE = re.compile(r'\{2:([IO])(\d{3})', re.I)
 
@@ -721,7 +835,8 @@ def _extract_mt202_from_tags(tags: Dict[str, str], verbose_text: str, direction:
 
 def _extract_mt103_from_tags(tags: Dict[str, str], verbose_text: str, direction: str,
                               source_label: str, sender_bic: str, receiver_bic: str,
-                              xlsx_path: Optional[str] = None) -> Optional[Dict]:
+                              xlsx_path: Optional[str] = None,
+                              correspondant: str = '') -> Optional[Dict]:
     """Extraire un message MT103 depuis ses tags SWIFT bruts."""
     row: Dict = {
         'type_MT': 'fin.103',
@@ -766,6 +881,28 @@ def _extract_mt103_from_tags(tags: Dict[str, str], verbose_text: str, direction:
                     row['institution_name'] = donneur
             except Exception:
                 pass
+
+        # Règle FED MT103 entrants (FRNYUS33): le 'donneur' au sens BEAC
+        # = institution CEMAC bénéficiaire (Trésor Public, banque commerciale).
+        # On l'extrait depuis :59:/:70:/:72: car F50F côté FED contient l'émetteur
+        # étranger (Apple, Vitol, Panoro...) qui n'est pas pertinent pour BEAC.
+        # Note: on se base sur le paramètre correspondant car block1 BIC est BEAC
+        # pour les fichiers FED (FRNYUS33 est dans le header block 2).
+        if (correspondant or '').upper().startswith('FRNYUS33'):
+            fed_info = _fed_extract_donneur_from_beneficiary(
+                tags.get('59') or '',
+                tags.get('70') or '',
+                tags.get('72') or '',
+                xlsx_path=xlsx_path,
+            )
+            if fed_info:
+                if fed_info.get('code'):
+                    row['code_donneur_dordre'] = fed_info['code']
+                if fed_info.get('name'):
+                    row['donneur_dordre'] = fed_info['name']
+                    row['institution_name'] = fed_info['name']
+                if fed_info.get('country'):
+                    row['pays_iso3'] = fed_info['country']
         
         # Commentaire F70 pour MT103 entrant
         if HAS_MT_MULTI_HELPERS:
@@ -1132,7 +1269,8 @@ def _process_single_message(msg_text: str, source_file: str, msg_idx: int,
     elif mt_type == '103':
         row = _extract_mt103_from_tags(
             tags, verbose_text, direction, source_label,
-            sender_bic or '', receiver_bic or '', xlsx_path=xlsx_path
+            sender_bic or '', receiver_bic or '', xlsx_path=xlsx_path,
+            correspondant=correspondant,
         )
     elif mt_type == '910':
         row = _extract_mt910_from_tags(
