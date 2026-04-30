@@ -1472,6 +1472,26 @@ if run_button:
             # Create and download workbook
             
             temp_outdir = Path(tempfile.mkdtemp(prefix="swift_out_"))
+            # ── Indicateur visuel : la construction du workbook peut être longue
+            # sur les gros volumes (~1-2 min pour 30k+ lignes). On affiche un
+            # placeholder informatif qui sera effacé après création.
+            _wb_total_rows = (
+                len(rows or []) + len(beaccmcx091_rows or [])
+                + len(exception_323201_rows or [])
+                + len(other_exceptions_rows or [])
+                + len(banque_de_france_rows or [])
+                + len(forex_rows or [])
+                + len(bdf_corr_exception_rows or [])
+                + len(st.session_state.get('nt_status_rejected_rows', []) or [])
+            )
+            _wb_placeholder = st.empty()
+            if _wb_total_rows >= 5000:
+                _wb_placeholder.info(
+                    f"📊 Construction du fichier Excel en cours ({_wb_total_rows:,} lignes)… "
+                    "cette étape peut prendre 1 à 2 minutes pour les gros volumes. Merci de patienter."
+                )
+            else:
+                _wb_placeholder.info("📊 Construction du fichier Excel en cours…")
             try:
                 if direction == "transfer_analysis" or (
                     direction == "eastnet_extraction"
@@ -1636,7 +1656,17 @@ if run_button:
                     'direction': direction
                 }
                 
+                # Construction terminée : effacer le message d'attente
+                try:
+                    _wb_placeholder.empty()
+                except Exception:
+                    pass
+
             except Exception as e:
+                try:
+                    _wb_placeholder.empty()
+                except Exception:
+                    pass
                 st.error(f"❌ Impossible de créer le workbook: {e}")
             finally:
                 try:
