@@ -149,6 +149,7 @@ if direction == "transfer_analysis":
     uploaded_excel_files = None
     uploaded_rje_mt900_files = None
     uploaded_rje_sortants_files = None
+    uploaded_eastnet_csv_files = None
 elif direction == "mt950_reconciliation":
     # Mode Rapprochement MT950: deux zones + sous-mode
     mt950_sub_mode = st.radio(
@@ -234,6 +235,27 @@ elif direction == "eastnet_extraction":
         uploaded_rje_mt900_files = None
         uploaded_rje_sortants_files = None
         mt950_sub_mode = "entrants"
+
+        # Mode 2 (sortants initiés) — pour CITI USD et BDF, demander en plus
+        # le CSV companion exporté depuis EastNets afin de filtrer les messages
+        # qui n'ont pas reçu d'acquittement réseau (Nt.Status != 'Network Ack').
+        uploaded_eastnet_csv_files = None
+        if eastnet_sub_mode == "rje_outgoing_mode2" and rje_correspondant in ("CITIUS33XXX", "BDFEFRPPXXX"):
+            st.markdown("#### 📎 CSV companion EastNets (filtre Nt.Status)")
+            st.caption(
+                "Pour CITI USD et BDF en mode sortants initiés, joignez le CSV "
+                "exporté depuis EastNets (mêmes dates que le RJE). Seuls les "
+                "messages avec **Nt.Status = 'Network Ack'** seront conservés. "
+                "Les autres (Nack, '-', absents du CSV) iront dans la feuille "
+                "« Sortants_Rejetes_NtStatus »."
+            )
+            uploaded_eastnet_csv_files = st.file_uploader(
+                "Déposez le(s) CSV EastNets companion",
+                type=["csv"],
+                accept_multiple_files=True,
+                help="Export EastNets : colonnes IO, Reference, Identifier, Status, Nt.Status, ...",
+                key=f"eastnet_csv_uploader{uploader_suffix}",
+            )
     elif eastnet_sub_mode == "rje_transfer_analysis_mode3":
         st.markdown("#### 📤 Fichiers RJE des messages sortants (MT202/MT103)")
         uploaded_rje_sortants_files = st.file_uploader(
@@ -288,6 +310,12 @@ elif direction == "eastnet_extraction":
     uploaded_mt950_files = None
     uploaded_mt950_msg_files = None
     uploaded_excel_files = None
+    # CSV companion EastNets : initialisé à None par défaut (uniquement utilisé
+    # en mode 2 sortants pour CITI USD / BDF, voir UI plus haut).
+    try:
+        uploaded_eastnet_csv_files
+    except NameError:
+        uploaded_eastnet_csv_files = None
 
 elif direction == "excel_extraction":
     # Mode Excel: sélecteur de correspondant + uploader xlsx/xls
@@ -327,6 +355,7 @@ elif direction == "excel_extraction":
     uploaded_mt950_msg_files = None
     uploaded_rje_mt900_files = None
     uploaded_rje_sortants_files = None
+    uploaded_eastnet_csv_files = None
 else:
     # Mode standard: un seul uploader
     uploaded_files = st.file_uploader(
@@ -344,6 +373,7 @@ else:
     uploaded_excel_files = None
     uploaded_rje_mt900_files = None
     uploaded_rje_sortants_files = None
+    uploaded_eastnet_csv_files = None
 
 # Date filter - PLAGE DE DATES
 st.markdown("### 📅 Filtre par plage de dates")
@@ -460,6 +490,8 @@ if run_button:
         st.session_state.excel_filename_entrant = None
         st.session_state.excel_data_sortant = None
         st.session_state.excel_filename_sortant = None
+        # Réinitialiser la liste des rejets Nt.Status pour ce run.
+        st.session_state['nt_status_rejected_rows'] = []
         
         rows = []
         beaccmcx091_rows = []  # Liste séparée pour les BEACCMCX091
@@ -847,6 +879,62 @@ if run_button:
                         _norm_rje(_main_rows)
                         for lst in (new_beac_rows, new_exc_323201, new_other_exc, new_bdf_rows, new_forex_rows):
                             _norm_rje(lst)
+
+                        # ── Filtre Nt.Status (CITI USD / BDF en mode 2 sortants) ─
+                        # Uniquement si l'utilisateur a fourni le CSV companion EastNets.
+                        nt_rejected_rows = []
+                        if (
+                            _is_outgoing
+                            and rje_correspondant in ("CITIUS33XXX", "BDFEFRPPXXX")
+                            and uploaded_eastnet_csv_files
+                        ):
+                            try:
+                                from extractors.eastnet_extractor import (
+                                    parse_eastnet_companion_csv,
+                                    filter_outgoing_by_nt_status,
+                                )
+                                csv_index = {}
+                                for cf in uploaded_eastnet_csv_files:
+                                    try:
+                                        tmp_csv = save_uploaded_to_temp(cf)
+                                        tmp_dirs.append(tmp_csv.parent)
+                                        csv_index.update(parse_eastnet_companion_csv(tmp_csv))
+                                    except Exception as _e_csv:
+                                        st.warning(f"⚠️ CSV {cf.name} ignoré : {_e_csv}")
+                                if csv_index:
+                                    _kept, _rej = filter_outgoing_by_nt_status(_main_rows, csv_index)
+                                    _main_rows = _kept
+                                    nt_rejected_rows = _rej
+                                    if _rej:
+                                        st.warning(
+                                            f"🚫 Filtre Nt.Status : {len(_rej)} message(s) sortant(s) "
+                                            f"écarté(s) (Nack / non acquittés / absents du CSV) — "
+                                            f"voir feuille « Sortants_Rejetes_NtStatus »."
+                                        )
+                                    st.info(
+                                        f"✅ Filtre Nt.Status appliqué : {len(_kept)} sortant(s) conservé(s) "
+                                        f"sur {len(_kept) + len(_rej)}"
+                                    )
+                            except Exception as _e_filter:
+                                tb = traceback.format_exc()
+                                errors.append(("Filtre Nt.Status (CSV EastNets)", str(_e_filter)))
+                                st.error(f"❌ Erreur filtre Nt.Status : {_e_filter}")
+                                with st.expander("Détails de l'erreur (filtre Nt.Status)"):
+                                    st.code(tb)
+                        elif (
+                            _is_outgoing
+                            and rje_correspondant in ("CITIUS33XXX", "BDFEFRPPXXX")
+                            and not uploaded_eastnet_csv_files
+                        ):
+                            st.info(
+                                "ℹ️ Aucun CSV EastNets companion fourni : le filtre Nt.Status "
+                                "n'est pas appliqué. Tous les sortants extraits du RJE sont conservés."
+                            )
+
+                        # Stocker les rejets pour le workbook
+                        st.session_state['nt_status_rejected_rows'] = (
+                            st.session_state.get('nt_status_rejected_rows', []) + nt_rejected_rows
+                        )
 
                         rows.extend(_main_rows)
                         beaccmcx091_rows.extend(new_beac_rows)
@@ -1449,7 +1537,8 @@ if run_button:
                                 other_exceptions_rows=other_exceptions_rows,
                                 banque_de_france_rows=banque_de_france_rows,
                                 forex_rows=forex_rows,
-                                bdf_corr_exception_rows=[]
+                                bdf_corr_exception_rows=[],
+                                nt_status_rejected_rows=st.session_state.get('nt_status_rejected_rows', []) if _single_dir == "outgoing" else None,
                             )
                         elif direction == "eastnet_extraction":
                             # Récupérer les listes entrants/sortants stockées en session

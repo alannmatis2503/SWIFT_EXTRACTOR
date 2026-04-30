@@ -15,9 +15,10 @@ Retourne:
 """
 
 import re
+import csv
 import logging
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +337,186 @@ def dedupe_mt900_rows(rows: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
             len(rows), len(unique), len(duplicates),
         )
     return unique, duplicates
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Filtre Nt.Status à partir du CSV d'export EastNets (CITI USD / BDF sortants)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Nt.Status accepté pour considérer qu'un message a effectivement été émis sur le
+# réseau SWIFT FIN (acquittement réseau positif). Tout autre statut est rejeté.
+_NT_STATUS_OK = {"NETWORK ACK"}
+
+# Statuts explicitement rejetés (à des fins de libellé dans la feuille de rejet).
+_NT_STATUS_REJECT_LABELS = {
+    "NETWORK NACK": "Network Nack — message refusé par SWIFT",
+    "-": "Pas d'acquittement réseau (Nt.Status='-')",
+    "": "Pas d'acquittement réseau (Nt.Status vide)",
+}
+
+
+def _normalize_csv_reference(value: Optional[str]) -> str:
+    """Normaliser une référence CSV EastNets (souvent encadrée par espaces/apostrophes).
+
+    Exemple : "' 1001/J029/CM '" → "1001/J029/CM"
+    """
+    if value is None:
+        return ""
+    return str(value).strip().strip("'").strip()
+
+
+def parse_eastnet_companion_csv(csv_path: Path) -> Dict[str, Dict[str, str]]:
+    """Charger un CSV d'export EastNets et indexer par Reference normalisée.
+
+    Le CSV contient les colonnes : IO, Correspondent, Reference, Format,
+    Identifier, Status, Amount, Ccy, Value Date, Sender, Receiver,
+    Creation Date, Nt.Status, Emi.Info, Rec.Info, Transaction reference, ...
+
+    Args:
+        csv_path: Chemin du fichier CSV (séparateur ',', encodage UTF-8 par défaut,
+                  fallback cp1252).
+
+    Returns:
+        dict { reference_normalisee: { 'nt_status': ..., 'status': ...,
+                                       'identifier': ..., 'correspondent': ... } }
+
+        En cas de doublons sur la référence dans le CSV, on conserve la première
+        ligne dont Nt.Status == 'Network Ack' (priorité au cas favorable),
+        puis à défaut la première occurrence rencontrée.
+    """
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV companion EastNets introuvable: {csv_path}")
+
+    last_err: Optional[Exception] = None
+    rows: List[Dict[str, str]] = []
+    for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+        try:
+            with open(csv_path, "r", encoding=encoding, newline="") as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+            break
+        except UnicodeDecodeError as e:  # pragma: no cover - rare
+            last_err = e
+            continue
+    else:  # pragma: no cover
+        raise RuntimeError(f"Impossible de décoder le CSV {csv_path}: {last_err}")
+
+    index: Dict[str, Dict[str, str]] = {}
+    for r in rows:
+        ref = _normalize_csv_reference(r.get("Reference"))
+        if not ref:
+            continue
+        nt_status = (r.get("Nt.Status") or "").strip()
+        status = (r.get("Status") or "").strip()
+        identifier = (r.get("Identifier") or "").strip()
+        correspondent = (r.get("Correspondent") or "").strip()
+        io_val = (r.get("IO") or "").strip()
+
+        existing = index.get(ref)
+        if existing is None:
+            index[ref] = {
+                "nt_status": nt_status,
+                "status": status,
+                "identifier": identifier,
+                "correspondent": correspondent,
+                "io": io_val,
+            }
+        else:
+            # priorité à la ligne avec Network Ack si conflit
+            if nt_status.upper() == "NETWORK ACK" and existing["nt_status"].upper() != "NETWORK ACK":
+                index[ref] = {
+                    "nt_status": nt_status,
+                    "status": status,
+                    "identifier": identifier,
+                    "correspondent": correspondent,
+                    "io": io_val,
+                }
+
+    logger.info(
+        "parse_eastnet_companion_csv: %s → %d lignes lues, %d références uniques indexées",
+        csv_path.name, len(rows), len(index),
+    )
+    return index
+
+
+def filter_outgoing_by_nt_status(
+    rows: List[Dict],
+    csv_index: Dict[str, Dict[str, str]],
+) -> Tuple[List[Dict], List[Dict]]:
+    """Filtrer une liste de messages sortants selon le Nt.Status du CSV companion.
+
+    Règle stricte : on conserve uniquement les messages dont la référence
+    (`r['reference']`) figure dans le CSV avec ``Nt.Status == 'Network Ack'``.
+
+    Tout le reste est rejeté :
+      - ``Nt.Status == 'Network Nack'`` (refusé par le réseau)
+      - ``Nt.Status == '-'`` ou vide (pas d'acquittement réseau)
+      - référence absente du CSV (anomalie d'export EastNets)
+
+    Les lignes rejetées sont annotées avec :
+      - ``_nt_status`` : statut réseau brut (ou None)
+      - ``_csv_status`` : statut applicatif EastNets (ou None)
+      - ``_csv_identifier`` : type de message côté CSV (ex: fin.103)
+      - ``_rejet_raison`` : libellé humainement lisible du motif de rejet
+
+    Args:
+        rows: lignes extraites du RJE (mode 2 sortants), chacune doit porter
+              une clé ``reference``.
+        csv_index: index renvoyé par :func:`parse_eastnet_companion_csv`.
+
+    Returns:
+        (kept, rejected) — deux listes disjointes.
+    """
+    kept: List[Dict] = []
+    rejected: List[Dict] = []
+
+    for r in rows:
+        ref = (r.get("reference") or "").strip()
+        if not ref:
+            # Pas de :20: → pas de jointure possible. On rejette par sûreté.
+            dup = dict(r)
+            dup["_nt_status"] = None
+            dup["_csv_status"] = None
+            dup["_csv_identifier"] = None
+            dup["_rejet_raison"] = "Référence (:20:) vide — jointure CSV impossible"
+            rejected.append(dup)
+            continue
+
+        info = csv_index.get(ref)
+        if info is None:
+            dup = dict(r)
+            dup["_nt_status"] = None
+            dup["_csv_status"] = None
+            dup["_csv_identifier"] = None
+            dup["_rejet_raison"] = "Référence absente du CSV EastNets"
+            rejected.append(dup)
+            continue
+
+        nt = (info.get("nt_status") or "").strip()
+        if nt.upper() in _NT_STATUS_OK:
+            r["_nt_status"] = nt
+            r["_csv_status"] = info.get("status")
+            r["_csv_identifier"] = info.get("identifier")
+            kept.append(r)
+        else:
+            dup = dict(r)
+            dup["_nt_status"] = nt or None
+            dup["_csv_status"] = info.get("status")
+            dup["_csv_identifier"] = info.get("identifier")
+            dup["_rejet_raison"] = _NT_STATUS_REJECT_LABELS.get(
+                nt.upper(),
+                f"Nt.Status non acquitté ({nt!r})",
+            )
+            rejected.append(dup)
+
+    if rejected:
+        logger.info(
+            "filter_outgoing_by_nt_status: %d sortants en entrée → %d conservés (Network Ack), %d rejetés",
+            len(rows), len(kept), len(rejected),
+        )
+    return kept, rejected
+
 
 # Tags SWIFT bruts — ex: :20:, :32A:, :52A:, etc.
 _SWIFT_TAG_RE = re.compile(r':([0-9]{2}[A-Z]?):', re.MULTILINE)

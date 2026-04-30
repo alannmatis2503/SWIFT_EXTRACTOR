@@ -576,7 +576,7 @@ def _sanitize_sheet_title(name: str, max_len: int = 31) -> str:
     return sanitized
 
 
-def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None, other_exceptions_rows: Optional[List[Dict]] = None, banque_de_france_rows: Optional[List[Dict]] = None, forex_rows: Optional[List[Dict]] = None, bdf_corr_exception_rows: Optional[List[Dict]] = None, date_start: str = None, date_end: str = None) -> Path:
+def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming", beaccmcx091_rows: Optional[List[Dict]] = None, exception_323201_rows: Optional[List[Dict]] = None, other_exceptions_rows: Optional[List[Dict]] = None, banque_de_france_rows: Optional[List[Dict]] = None, forex_rows: Optional[List[Dict]] = None, bdf_corr_exception_rows: Optional[List[Dict]] = None, date_start: str = None, date_end: str = None, nt_status_rejected_rows: Optional[List[Dict]] = None) -> Path:
     """
     Create an Excel workbook with:
       - a 'summary' sheet containing one row per extracted file (display headers in French)
@@ -1155,6 +1155,66 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         try:
             back_cell.hyperlink = "#summary!A1"
             back_cell.style = "Hyperlink"
+        except Exception:
+            pass
+
+    # ────────────────────────────────────────────────────────────────────
+    # Feuille "Sortants_Rejetes_NtStatus" — sortants RJE écartés au filtre
+    # Nt.Status (mode 2 RJE pour CITI USD / BDF). Insérée en dernière position.
+    # ────────────────────────────────────────────────────────────────────
+    if nt_status_rejected_rows:
+        rej_sheet = wb.create_sheet(title="Sortants_Rejetes_NtStatus")
+        rej_headers = [
+            "type_MT",
+            "reference",
+            "date_reference",
+            "devise",
+            "montant",
+            "Code du donneur d'ordre",
+            "donneur d'ordre",
+            "Bénéficiaire",
+            "pays_iso3",
+            "correspondant",
+            "Nt.Status (CSV)",
+            "Status (CSV)",
+            "Identifier (CSV)",
+            "raison_rejet",
+            "source_pdf",
+        ]
+        # Ligne 1 : lien retour ; ligne 2 : headers
+        back_cell = rej_sheet.cell(row=1, column=1)
+        back_cell.value = "⬅ Retour au summary"
+        try:
+            back_cell.hyperlink = "#summary!A1"
+            back_cell.style = "Hyperlink"
+        except Exception:
+            pass
+        rej_sheet.append(rej_headers)
+        for r in nt_status_rejected_rows:
+            rej_sheet.append([
+                r.get("type_MT"),
+                r.get("reference"),
+                r.get("date_reference"),
+                r.get("devise"),
+                r.get("montant"),
+                r.get("code_donneur_dordre"),
+                r.get("donneur_dordre") or r.get("institution_name"),
+                r.get("beneficiaire"),
+                r.get("pays_iso3"),
+                r.get("correspondant"),
+                r.get("_nt_status"),
+                r.get("_csv_status"),
+                r.get("_csv_identifier"),
+                r.get("_rejet_raison"),
+                r.get("source_pdf"),
+            ])
+        try:
+            for col_idx in range(1, len(rej_headers) + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in rej_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10,
+                )
+                rej_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
         except Exception:
             pass
 
