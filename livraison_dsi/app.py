@@ -1693,17 +1693,59 @@ if run_button:
 if st.session_state.extraction_results is not None and st.session_state.excel_data is not None:
     st.markdown("---")
     st.markdown("### 📊 Résultats de l'extraction")
-    
+
     results = st.session_state.extraction_results
     rows = results['rows']
     beaccmcx091_rows = results.get('beaccmcx091_rows', [])
     exception_323201_rows = results.get('exception_323201_rows', [])
     all_missing_codes = results.get('all_missing_codes', {"unmapped": set(), "empty": set()})
     direction = results.get('direction', 'incoming')
-    
-    # Afficher le tableau des résultats
+
+    # ── Bouton de téléchargement EN HAUT (toujours visible immédiatement) ─────
+    # Sur les gros volumes (33k+ lignes), st.dataframe peut figer le navigateur.
+    # On expose donc le bouton AVANT le tableau pour garantir l'accès au fichier.
+    st.markdown("#### 💾 Téléchargement immédiat")
+    if st.session_state.get('excel_data_entrant') and st.session_state.get('excel_data_sortant'):
+        col_dlt1, col_dlt2 = st.columns(2)
+        with col_dlt1:
+            st.download_button(
+                label="⬇️ Télécharger ENTRANTS",
+                data=st.session_state.excel_data_entrant,
+                file_name=st.session_state.excel_filename_entrant,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True, type="primary",
+                key="dl_top_entrant",
+            )
+        with col_dlt2:
+            st.download_button(
+                label="⬇️ Télécharger SORTANTS",
+                data=st.session_state.excel_data_sortant,
+                file_name=st.session_state.excel_filename_sortant,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True, type="primary",
+                key="dl_top_sortant",
+            )
+    else:
+        st.download_button(
+            label=f"⬇️ Télécharger le fichier Excel ({st.session_state.excel_filename})",
+            data=st.session_state.excel_data,
+            file_name=st.session_state.excel_filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True, type="primary",
+            key="dl_top_main",
+        )
+
+    # Afficher le tableau des résultats (tronqué pour éviter de figer le navigateur)
+    _MAX_DISPLAY_ROWS = 1000
+    rows_to_display = rows[:_MAX_DISPLAY_ROWS]
+    if len(rows) > _MAX_DISPLAY_ROWS:
+        st.caption(
+            f"ℹ️ Aperçu limité aux {_MAX_DISPLAY_ROWS} premières lignes "
+            f"(sur {len(rows):,} extraites). Le fichier Excel téléchargeable contient toutes les données."
+        )
+
     display_rows = []
-    for r in rows:
+    for r in rows_to_display:
         display_rows.append({
             "Correspondant": r.get("correspondant"),
             "Date Référence": r.get("date_reference"),
