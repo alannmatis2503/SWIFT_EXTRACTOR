@@ -10,6 +10,7 @@ Extracteur MT202 (text-level). Fournit :
 import re
 from datetime import datetime
 from typing import Optional
+from functools import lru_cache
 from dateutil import parser as dateparser
 import pdfplumber
 
@@ -112,15 +113,23 @@ def extract_text_from_pdf(path):
     return txt
 
 # ---------- low-level helpers ----------
+@lru_cache(maxsize=64)
+def _get_field_block_pattern(field_label: str):
+    """Pattern compilé pour extraire un bloc Fxx, mis en cache par étiquette."""
+    return re.compile(
+        r'(?si)(' + re.escape(field_label) + r'[:\s]*)(.*?)(?=\nF\d{2}[A-Z]?:|\nF\d{2}\b|$)'
+    )
+
+
 def get_field_block(text: str, field_label: str) -> Optional[str]:
     """
     Return the multiline text belonging to a tag Fxx (e.g. 'F52A' or 'F20') inside `text`.
     """
     if not text:
         return None
-    # Try label with optional trailing colon/description and capture following lines until next Fxx or end
-    pattern = re.compile(r'(?si)(' + re.escape(field_label) + r'[:\s]*)(.*?)(?=\nF\d{2}[A-Z]?:|\nF\d{2}\b|$)')
-    m = pattern.search(text)
+    # Pattern précompilé et mis en cache par étiquette (économie majeure de
+    # `re._compile` sur les fichiers RJE volumineux : ~185k appels par an BDF).
+    m = _get_field_block_pattern(field_label).search(text)
     return m.group(2).strip() if m else None
 
 def parse_amount(s: Optional[str]) -> Optional[float]:

@@ -89,7 +89,7 @@ def _find_strict_identifier_in_f52(f52_text: str) -> Optional[str]:
     return None
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=8)
 def load_bic_mapping(xlsx_path: Optional[str] = None) -> Dict[str, str]:
     """
     Load the BIC mapping Excel file and return a dict mapping 8-char key -> bank name.

@@ -16,6 +16,7 @@ Retourne:
 
 import re
 import csv
+import os
 import logging
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Iterable
@@ -1773,6 +1774,123 @@ def _process_single_message(msg_text: str, source_file: str, msg_idx: int,
     return row, direction, 'main'
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Parallélisation message-par-message (ProcessPoolExecutor)
+# ─────────────────────────────────────────────────────────────────────────────
+# Pour les fichiers RJE volumineux (~40k messages → 22s sur un cœur), le
+# traitement message-par-message est parfaitement parallélisable car chaque
+# message est indépendant. On encapsule la boucle dans un pool de workers.
+#
+# Activation :
+#   - Auto si nb messages >= EASTNET_PARALLEL_THRESHOLD (défaut: 2000)
+#   - Désactivé si EASTNET_NO_PARALLEL=1 (variable d'environnement)
+#   - Nombre de workers : min(cpu_count - 1, 8) ou EASTNET_PARALLEL_WORKERS
+
+_EASTNET_PARALLEL_THRESHOLD = int(os.environ.get("EASTNET_PARALLEL_THRESHOLD", "2000"))
+_EASTNET_PARALLEL_DISABLED = os.environ.get("EASTNET_NO_PARALLEL") == "1"
+
+
+def _eastnet_default_workers() -> int:
+    """Nombre de workers optimal (configurable via EASTNET_PARALLEL_WORKERS)."""
+    env = os.environ.get("EASTNET_PARALLEL_WORKERS")
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    cpu = os.cpu_count() or 4
+    return max(1, min(cpu - 1, 8))
+
+
+# Variables initialisées par worker (chargées une seule fois par process)
+_W_XLSX: Optional[str] = None
+_W_FOREX: set = set()
+_W_CORR: str = ""
+
+
+def _eastnet_worker_init(xlsx_path: Optional[str], forex_codes_pickled: List[str], correspondant: str) -> None:
+    """Initializer ProcessPoolExecutor : précharge la table BIC et les codes forex.
+
+    Appelé une seule fois par processus enfant lors de sa création. Évite de
+    repayer l'overhead de chargement Excel pour chaque chunk de messages.
+    """
+    global _W_XLSX, _W_FOREX, _W_CORR
+    _W_XLSX = xlsx_path
+    _W_FOREX = set(forex_codes_pickled or [])
+    _W_CORR = correspondant or ""
+    if HAS_BIC_UTILS:
+        try:
+            bic_utils.load_bic_mapping(xlsx_path)
+        except Exception:  # pragma: no cover
+            pass
+
+
+def _eastnet_worker_process_chunk(args: Tuple[str, List[Tuple[int, str]]]) -> List[Tuple[int, Optional[Dict], str, str]]:
+    """Worker : traite une liste de (idx, msg_text) et retourne les résultats."""
+    source_file, items = args
+    out: List[Tuple[int, Optional[Dict], str, str]] = []
+    for idx, msg_text in items:
+        try:
+            row, direction, category = _process_single_message(
+                msg_text, source_file, idx,
+                xlsx_path=_W_XLSX, forex_codes=_W_FOREX,
+                correspondant=_W_CORR,
+            )
+            out.append((idx, row, direction, category))
+        except Exception as e:  # pragma: no cover
+            logger.warning("eastnet[worker]: erreur message %d: %s", idx, e)
+            out.append((idx, None, '', 'reject'))
+    return out
+
+
+def _process_messages_parallel(
+    messages: List[str],
+    source_file: str,
+    correspondant: str,
+    xlsx_path: Optional[str],
+    forex_codes: set,
+    n_workers: Optional[int] = None,
+    chunk_size: Optional[int] = None,
+) -> List[Tuple[int, Optional[Dict], str, str]]:
+    """Traiter une liste de messages RJE en parallèle (ProcessPoolExecutor).
+
+    Découpe les messages en chunks distribués aux workers. Retourne la liste
+    triée par index croissant (l'ordre n'a pas d'importance fonctionnelle).
+    """
+    from concurrent.futures import ProcessPoolExecutor
+
+    if n_workers is None:
+        n_workers = _eastnet_default_workers()
+    n = len(messages)
+    if chunk_size is None:
+        # ~4 chunks par worker pour amortir overhead pickle vs équilibrage charge.
+        chunk_size = max(50, (n // (n_workers * 4)) or 1)
+
+    indexed = list(enumerate(messages, start=1))
+    chunks: List[Tuple[str, List[Tuple[int, str]]]] = []
+    for i in range(0, n, chunk_size):
+        chunks.append((source_file, indexed[i:i + chunk_size]))
+
+    forex_list = sorted(forex_codes) if forex_codes else []
+    results: List[Tuple[int, Optional[Dict], str, str]] = []
+
+    logger.info(
+        "eastnet: parallélisation — %d messages, %d workers, %d chunks (~%d msg/chunk)",
+        n, n_workers, len(chunks), chunk_size,
+    )
+
+    with ProcessPoolExecutor(
+        max_workers=n_workers,
+        initializer=_eastnet_worker_init,
+        initargs=(xlsx_path, forex_list, correspondant),
+    ) as pool:
+        for chunk_result in pool.map(_eastnet_worker_process_chunk, chunks):
+            results.extend(chunk_result)
+
+    results.sort(key=lambda t: t[0])
+    return results
+
+
 # ── Point d'entrée public ─────────────────────────────────────────────────────
 
 def extract_from_rje_file(
@@ -1850,41 +1968,69 @@ def extract_from_rje_file(
     bdf_corr_exception_rows: List[Dict] = []
     missing_codes: Dict = {'unmapped': set(), 'empty': set()}
     
-    for idx, msg_text in enumerate(messages, start=1):
+    # ── Mode parallèle (ProcessPoolExecutor) si seuil dépassé ────────────────
+    use_parallel = (
+        not _EASTNET_PARALLEL_DISABLED
+        and len(messages) >= _EASTNET_PARALLEL_THRESHOLD
+    )
+
+    iterator = None
+    if use_parallel:
         try:
-            row, direction, category = _process_single_message(
-                msg_text, rje_path.name, idx,
-                xlsx_path=xlsx_path, forex_codes=forex_codes,
-                correspondant=correspondant,
+            processed = _process_messages_parallel(
+                messages, rje_path.name, correspondant, xlsx_path, forex_codes,
             )
-            
-            if row is None or category == 'reject':
-                continue
-            
-            # Affecter le correspondant
-            row['correspondant'] = correspondant
-            
-            # Router vers la bonne catégorie
-            if category == 'beaccmcx091':
-                beaccmcx091_rows.append(row)
-            elif category == 'exception_323201':
-                exception_323201_rows.append(row)
-            elif category == 'other_exception':
-                other_exceptions_rows.append(row)
-            elif category == 'banque_de_france':
-                banque_de_france_rows.append(row)
-            elif category == 'forex':
-                forex_rows.append(row)
-            elif category == 'bdf_corr_exception':
-                bdf_corr_exception_rows.append(row)
-            else:  # 'main'
-                if direction == 'incoming':
-                    incoming_rows.append(row)
-                else:
-                    outgoing_rows.append(row)
-        
-        except Exception as e:
-            logger.warning("eastnet: erreur traitement message %d de %s: %s", idx, rje_path.name, e)
+            iterator = iter(processed)
+        except Exception as _e_par:
+            logger.warning(
+                "eastnet: parallélisation échouée (%s) — fallback séquentiel", _e_par,
+            )
+            iterator = None
+
+    if iterator is None:
+        # Mode séquentiel (fichier trop petit ou parallèle désactivé/cassé)
+        def _seq_iter():
+            for _i, _m in enumerate(messages, start=1):
+                try:
+                    _row, _dir, _cat = _process_single_message(
+                        _m, rje_path.name, _i,
+                        xlsx_path=xlsx_path, forex_codes=forex_codes,
+                        correspondant=correspondant,
+                    )
+                    yield (_i, _row, _dir, _cat)
+                except Exception as _exc:
+                    logger.warning(
+                        "eastnet: erreur traitement message %d de %s: %s",
+                        _i, rje_path.name, _exc,
+                    )
+                    yield (_i, None, '', 'reject')
+        iterator = _seq_iter()
+
+    for _idx, row, direction, category in iterator:
+        if row is None or category == 'reject':
+            continue
+
+        # Affecter le correspondant
+        row['correspondant'] = correspondant
+
+        # Router vers la bonne catégorie
+        if category == 'beaccmcx091':
+            beaccmcx091_rows.append(row)
+        elif category == 'exception_323201':
+            exception_323201_rows.append(row)
+        elif category == 'other_exception':
+            other_exceptions_rows.append(row)
+        elif category == 'banque_de_france':
+            banque_de_france_rows.append(row)
+        elif category == 'forex':
+            forex_rows.append(row)
+        elif category == 'bdf_corr_exception':
+            bdf_corr_exception_rows.append(row)
+        else:  # 'main'
+            if direction == 'incoming':
+                incoming_rows.append(row)
+            else:
+                outgoing_rows.append(row)
     
     logger.info(
         "eastnet: %s → %d entrants, %d sortants, %d BEAC, %d 323201, "
