@@ -1,31 +1,13 @@
+# backend/app/extractors/mt900.py
 """
-=============================================================================
- Extracteur MT900 — Confirmations de débit
-=============================================================================
- Ce module extrait les données structurées depuis un message SWIFT MT900
- (confirmation qu'un débit a été porté au compte d'une institution).
+Extractor for SWIFT MT900 (Confirmation of Debit).
+Used for "Analyse des transferts sortants exécutés" feature.
 
- Rôle dans l'application :
-   Le MT900 est utilisé exclusivement dans le mode « Analyse des transferts
-   exécutés ». Il confirme qu'un virement sortant (MT202/MT103) a bien été
-   exécuté par la banque correspondante.
-
- Champs SWIFT spécifiques au MT900 :
-   - F20  : Référence de la transaction MT900
-   - F21  : Référence d'origine — c'est la CLÉ DE MATCHING :
-            F21 du MT900 = F20 du MT202/MT103 correspondant
-   - F32A : Date valeur + Devise + Montant
-
- Règles de matching :
-   1. Le MT900 est rapproché du MT103/MT202 via F21 ↔ F20
-   2. Les informations manquantes du MT900 (donneur, bénéficiaire, pays)
-      sont complétées par celles du message matché
-   3. Les MT900 avec T2PL dans F20 → exception « T2PL »
-   4. Les MT900 avec NIVLT dans F21 → exception « nivellement »
-
- Dépendances :
-   - Réutilise get_field_block, parse_amount, parse_date_YYMMDD de mt202.py
-============================================================================="""
+Extracts:
+- F20: Reference (Transaction Reference)
+- F21: Related Reference (Original Reference) - used to match with 202/103
+- F32A: Value Date, Currency, Amount
+"""
 
 import re
 from pathlib import Path

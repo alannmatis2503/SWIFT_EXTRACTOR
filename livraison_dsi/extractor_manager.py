@@ -38,6 +38,15 @@ except Exception:
     HAS_MT_MULTI = False
     logger.info("mt_multi extractor not available at import time; multi-file detection will fall back to single extractors.")
 
+# bic_utils: mapping code Reglement -> {nom, BIC, pays}
+try:
+    from extractors import bic_utils as _bic_utils
+    HAS_BIC_UTILS = True
+except Exception:
+    _bic_utils = None
+    HAS_BIC_UTILS = False
+    logger.info("bic_utils extractor not available at import time; reglement mapping will be skipped.")
+
 # regex to detect MT/FIN code
 MT_DETECT = re.compile(r'\b(?:MT|FIN)[\s\-\_\.:\/]*(\d{3})\b', re.I)
 IDENTIFIER_FIN_RE = re.compile(r'Identifier[:\s]*fin[\.:\s\-\/]*(\d{3})', re.I)
@@ -642,6 +651,9 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         except Exception:
             return date_str
 
+    # Compteur de lignes par feuille pour éviter sheet.max_row (O(n) par appel)
+    _sheet_row_counts = {}
+
     def _write_row_to_sheet(sheet, r, row_num=None, hyperlink_sheet_name=None):
         """Écrire une ligne de données dans une feuille.
         
@@ -658,6 +670,16 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
         beneficiaire = r.get("beneficiaire") or None
         correspondant = r.get("correspondant") or None
         commentaires = r.get("commentaires") or None
+        # Sanitize: ensure no tuples/lists leak into Excel cells
+        for _field in ('code_donneur', 'donneur', 'beneficiaire', 'correspondant', 'commentaires'):
+            _v = locals()[_field]
+            if isinstance(_v, (list, tuple)):
+                locals()[_field]  # can't reassign via locals(); use direct assignment below
+        if isinstance(code_donneur, (list, tuple)): code_donneur = code_donneur[0] if code_donneur else None
+        if isinstance(donneur, (list, tuple)): donneur = donneur[0] if donneur else None
+        if isinstance(beneficiaire, (list, tuple)): beneficiaire = beneficiaire[0] if beneficiaire else None
+        if isinstance(correspondant, (list, tuple)): correspondant = correspondant[0] if correspondant else None
+        if isinstance(commentaires, (list, tuple)): commentaires = commentaires[0] if commentaires else None
         date_ref = _convert_date_to_excel(r.get("date_reference"))
         reference_origine = r.get("reference_origine") or None
         source_pdf = r.get("source_pdf") or ""
@@ -677,9 +699,20 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
             commentaires,
             source_pdf
         ]
+        # Final safety: replace any tuple/list values with their first element
+        row_data = [
+            (v[0] if isinstance(v, (list, tuple)) and v else None) if isinstance(v, (list, tuple)) else v
+            for v in row_data
+        ]
         sheet.append(row_data)
         
-        current_row = sheet.max_row
+        # Utiliser un compteur local au lieu de sheet.max_row (O(n) par appel → O(n²))
+        sheet_id = id(sheet)
+        if sheet_id not in _sheet_row_counts:
+            _sheet_row_counts[sheet_id] = 2  # Row 1 = header, first data row = 2
+        else:
+            _sheet_row_counts[sheet_id] += 1
+        current_row = _sheet_row_counts[sheet_id]
         
         # Appliquer le format date à la colonne date_reference (colonne B = 2)
         if date_ref and isinstance(date_ref, datetime):
@@ -755,6 +788,10 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     # et détecter BEAC dans le donneur d'ordre pour assigner le pays si manquant
     for r in rows:
         donneur = r.get("donneur_dordre") or r.get("institution_name") or ""
+        if isinstance(donneur, (list, tuple)):
+            donneur = donneur[0] if donneur else ""
+        if not isinstance(donneur, str):
+            donneur = str(donneur) if donneur else ""
         if donneur and "BEAC" in donneur.upper():
             if not r.get("pays_iso3"):
                 r["pays_iso3"] = "BEAC"
@@ -768,28 +805,32 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
                 # BEAC sera renommé en Operations_BEAC
                 all_countries.add("Operations_BEAC" if country == "BEAC" else country)
     
-    # Noms de feuilles réservés (déjà utilisés par d'autres onglets)
-    reserved_names = {
-        "summary", "BEACCMCX091", "Exceptions_323201", 
-        "Autres_Exceptions", "Doublons_potentiels"
-    }
-    reserved_names.update(all_countries)
-    
-    # Calculer les noms de feuilles en évitant les noms réservés
-    used_names_precompute = set(reserved_names)
-    for r in rows:
-        # Pré-calculer le nom de la feuille
-        base = r.get("source_pdf", "sheet")
-        title = _sanitize_sheet_title(str(base))
-        original = title
-        i = 1
-        while title in used_names_precompute:
-            suffix = f"_{i}"
-            max_base_len = 31 - len(suffix)
-            title = (original[:max_base_len] + suffix) if len(original) > max_base_len else (original + suffix)
-            i += 1
-        used_names_precompute.add(title)
-        row_id_to_sheet_name[id(r)] = title
+    # Skip per-row detail sheets for Excel extraction mode (too many rows)
+    skip_per_row_sheets = direction.startswith("excel_extraction") or direction.startswith("eastnet_")
+
+    if not skip_per_row_sheets:
+        # Noms de feuilles réservés (déjà utilisés par d'autres onglets)
+        reserved_names = {
+            "summary", "BEACCMCX091", "Exceptions_323201", 
+            "Autres_Exceptions", "Doublons_potentiels"
+        }
+        reserved_names.update(all_countries)
+        
+        # Calculer les noms de feuilles en évitant les noms réservés
+        used_names_precompute = set(reserved_names)
+        for r in rows:
+            # Pré-calculer le nom de la feuille
+            base = r.get("source_pdf", "sheet")
+            title = _sanitize_sheet_title(str(base))
+            original = title
+            i = 1
+            while title in used_names_precompute:
+                suffix = f"_{i}"
+                max_base_len = 31 - len(suffix)
+                title = (original[:max_base_len] + suffix) if len(original) > max_base_len else (original + suffix)
+                i += 1
+            used_names_precompute.add(title)
+            row_id_to_sheet_name[id(r)] = title
     
     # ÉTAPE 3: Écrire les rows dans summary (en excluant les doublons) avec liens hypertextes
     for r in rows:
@@ -801,10 +842,15 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     if beaccmcx091_rows and len(beaccmcx091_rows) > 0:
         beac_sheet = wb.create_sheet(title="BEACCMCX091", index=1)
         beac_sheet.append(display_headers)
-        
+
+        # Note : on n'applique pas `rows_to_exclude_from_summary` ici car les
+        # "doublons" détectés par clé (F20, montant, direction) correspondent
+        # le plus souvent à des relations légitimes entre messages SWIFT liés
+        # (MT103/MT202/MT910 partageant la même F20). Les exclure ici viderait
+        # la feuille d'exception qui doit refléter l'intégralité des messages
+        # ayant déclenché la règle.
         for r in beaccmcx091_rows:
-            if id(r) not in rows_to_exclude_from_summary:
-                _write_row_to_sheet(beac_sheet, r)
+            _write_row_to_sheet(beac_sheet, r)
         
         # Adjust column widths for BEACCMCX091 sheet
         try:
@@ -821,10 +867,10 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     if exception_323201_rows and len(exception_323201_rows) > 0:
         exc_sheet = wb.create_sheet(title="Exceptions_323201", index=2 if beaccmcx091_rows else 1)
         exc_sheet.append(display_headers)
-        
+
+        # Pas de filtre rows_to_exclude_from_summary : voir commentaire feuille BEACCMCX091.
         for r in exception_323201_rows:
-            if id(r) not in rows_to_exclude_from_summary:
-                _write_row_to_sheet(exc_sheet, r)
+            _write_row_to_sheet(exc_sheet, r)
         
         # Adjust column widths
         try:
@@ -847,10 +893,10 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
     if other_exceptions_rows and len(other_exceptions_rows) > 0:
         other_exc_sheet = wb.create_sheet(title="Autres_Exceptions", index=sheet_index)
         other_exc_sheet.append(display_headers)
-        
+
+        # Pas de filtre rows_to_exclude_from_summary : voir commentaire feuille BEACCMCX091.
         for r in other_exceptions_rows:
-            if id(r) not in rows_to_exclude_from_summary:
-                _write_row_to_sheet(other_exc_sheet, r)
+            _write_row_to_sheet(other_exc_sheet, r)
         
         # Adjust column widths
         try:
@@ -1035,61 +1081,63 @@ def create_workbook(rows: List[Dict], out_dir: Path, direction: str = "incoming"
             logger.debug("Failed to create country sheet for %s: %s", country_code, e)
 
     # create per-file sheets (key/value) - AFTER country summaries
-    # Utiliser les noms pré-calculés pour garantir la cohérence avec les hyperliens
-    for r in rows:
-        title = row_id_to_sheet_name.get(id(r))
-        if not title:
-            # Fallback si pas de nom pré-calculé (ne devrait pas arriver)
-            base = r.get("source_pdf", "sheet")
-            title = _sanitize_sheet_title(str(base))
-        
-        # Vérifier que le nom n'existe pas déjà dans le workbook (sécurité)
-        if title in wb.sheetnames:
-            # Ajouter un suffixe unique
-            i = 1
-            original = title
-            while title in wb.sheetnames:
-                suffix = f"_{i}"
-                max_base_len = 31 - len(suffix)
-                title = (original[:max_base_len] + suffix) if len(original) > max_base_len else (original + suffix)
-                i += 1
-        ws = wb.create_sheet(title=title)
+    # Skip for Excel extraction mode (rows are individual transactions, not SWIFT messages)
+    if not skip_per_row_sheets:
+        # Utiliser les noms pré-calculés pour garantir la cohérence avec les hyperliens
+        for r in rows:
+            title = row_id_to_sheet_name.get(id(r))
+            if not title:
+                # Fallback si pas de nom pré-calculé (ne devrait pas arriver)
+                base = r.get("source_pdf", "sheet")
+                title = _sanitize_sheet_title(str(base))
+            
+            # Vérifier que le nom n'existe pas déjà dans le workbook (sécurité)
+            if title in wb.sheetnames:
+                # Ajouter un suffixe unique
+                i = 1
+                original = title
+                while title in wb.sheetnames:
+                    suffix = f"_{i}"
+                    max_base_len = 31 - len(suffix)
+                    title = (original[:max_base_len] + suffix) if len(original) > max_base_len else (original + suffix)
+                    i += 1
+            ws = wb.create_sheet(title=title)
 
-        # Lien retour vers la feuille summary (première ligne)
-        ws.append(["⬅ Retour au summary", ""])
-        try:
-            back_cell = ws.cell(row=1, column=1)
-            back_cell.hyperlink = "#summary!A1"
-            back_cell.style = "Hyperlink"
-        except Exception:
-            pass
-        ws.append([])  # Ligne vide de séparation
+            # Lien retour vers la feuille summary (première ligne)
+            ws.append(["⬅ Retour au summary", ""])
+            try:
+                back_cell = ws.cell(row=1, column=1)
+                back_cell.hyperlink = "#summary!A1"
+                back_cell.style = "Hyperlink"
+            except Exception:
+                pass
+            ws.append([])  # Ligne vide de séparation
 
-        ordered_keys = [
-            "correspondant", "date_reference", "reference", "reference_origine", "type_MT", "pays_iso3",
-            "code_donneur_dordre", "donneur_dordre", "institution_name", "beneficiaire", 
-            "montant", "devise", "commentaires", "source_pdf"
-        ]
-        written = set()
-        for k in ordered_keys:
-            if k in r:
+            ordered_keys = [
+                "correspondant", "date_reference", "reference", "reference_origine", "type_MT", "pays_iso3",
+                "code_donneur_dordre", "donneur_dordre", "institution_name", "beneficiaire", 
+                "montant", "devise", "commentaires", "source_pdf"
+            ]
+            written = set()
+            for k in ordered_keys:
+                if k in r:
+                    label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else ("correspondant" if k == "correspondant" else ("commentaires" if k == "commentaires" else k))))
+                    ws.append([label, r.get(k)])
+                    written.add(k)
+            for k, v in r.items():
+                if k in written:
+                    continue
                 label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else ("correspondant" if k == "correspondant" else ("commentaires" if k == "commentaires" else k))))
-                ws.append([label, r.get(k)])
-                written.add(k)
-        for k, v in r.items():
-            if k in written:
-                continue
-            label = "Code du donneur d'ordre" if k == "code_donneur_dordre" else ("donneur d'ordre" if k in ("donneur_dordre", "institution_name") else ("Bénéficiaire" if k == "beneficiaire" else ("correspondant" if k == "correspondant" else ("commentaires" if k == "commentaires" else k))))
-            ws.append([label, v])
+                ws.append([label, v])
 
-        # adjust column widths heuristically
-        try:
-            max_len_col1 = max((len(str(row[0])) for row in ws.values if row[0] is not None), default=10)
-            max_len_col2 = max((len(str(row[1])) for row in ws.values if len(row) > 1 and row[1] is not None), default=10)
-            ws.column_dimensions[get_column_letter(1)].width = min(60, max(12, max_len_col1 + 2))
-            ws.column_dimensions[get_column_letter(2)].width = min(80, max(12, max_len_col2 + 8))
-        except Exception:
-            pass
+            # adjust column widths heuristically
+            try:
+                max_len_col1 = max((len(str(row[0])) for row in ws.values if row[0] is not None), default=10)
+                max_len_col2 = max((len(str(row[1])) for row in ws.values if len(row) > 1 and row[1] is not None), default=10)
+                ws.column_dimensions[get_column_letter(1)].width = min(60, max(12, max_len_col1 + 2))
+                ws.column_dimensions[get_column_letter(2)].width = min(80, max(12, max_len_col2 + 8))
+            except Exception:
+                pass
 
     # Ajouter un lien retour vers summary dans toutes les feuilles (sauf summary elle-même)
     for sheet_name in wb.sheetnames:
@@ -1185,12 +1233,24 @@ def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]
         return None
     
     # Créer un index des MT103/MT202 par référence pour le matching rapide
+    # Index "strict" : référence telle quelle (uppercase, trimmed)
+    # Index "loose" : référence avec tous les non-alphanumériques retirés
+    #   (utile quand un correspondant utilise '.' au lieu de '/' comme séparateur,
+    #   ex: MT900 Citi rel_ref="00290565.251104" ↔ MT202 BEAC ref="00290565/251104")
+    import re as _re
+    def _loose_key(s: str) -> str:
+        return _re.sub(r'[^A-Z0-9]', '', str(s).upper()) if s else ''
+
     ref_index: Dict[str, Dict] = {}
+    ref_index_loose: Dict[str, Dict] = {}
     for row in transfer_rows:
         ref = row.get("reference")
         if ref:
             ref_key = str(ref).strip().upper()
             ref_index[ref_key] = row
+            lk = _loose_key(ref)
+            if lk:
+                ref_index_loose[lk] = row
     
     # Matcher les MT900 avec les MT103/MT202
     matched_mt900_rows: List[Dict] = []  # MT900 avec correspondant trouvé
@@ -1212,10 +1272,17 @@ def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]
         has_match = False
         if related_ref:
             ref_key = str(related_ref).strip().upper()
-            
-            if ref_key in ref_index:
-                # Match trouvé ! Compléter les infos du MT900 avec celles du MT103/MT202
-                matched_transfer = ref_index[ref_key]
+            matched_transfer = ref_index.get(ref_key)
+            matched_key_used = ref_key
+            # Fallback : matching "loose" sur version alphanumérique-only
+            #   ex: "00290565.251104" ↔ "00290565/251104"
+            if matched_transfer is None:
+                lk = _loose_key(related_ref)
+                if lk and lk in ref_index_loose:
+                    matched_transfer = ref_index_loose[lk]
+                    matched_key_used = (matched_transfer.get("reference") or "").strip().upper()
+
+            if matched_transfer is not None:
                 
                 # Copier les infos manquantes du MT103/MT202 vers le MT900
                 fields_to_copy = [
@@ -1235,8 +1302,13 @@ def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]
                 mt900_row["matched_type"] = matched_transfer.get("type_MT")
                 # Ajouter la source du message matché pour la traçabilité
                 mt900_row["matched_source"] = matched_transfer.get("source_pdf")
+
+                # Hériter de la catégorie du transfert matché afin que la
+                # feuille de destination (main / BEACCMCX091 / etc.) soit correcte.
+                if matched_transfer.get("_category"):
+                    mt900_row["_category"] = matched_transfer["_category"]
                 
-                matched_refs.add(ref_key)
+                matched_refs.add(matched_key_used)
                 has_match = True
         
         if has_match:
@@ -1288,15 +1360,18 @@ def extract_transfer_analysis_dispatch(pdf_path: Path) -> tuple[List[Dict], List
     return [], [], {"unmapped": set(), "empty": set()}
 
 
-def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: List[Dict], exception_rows: List[Dict], out_dir: Path, date_start: str = None, date_end: str = None, unmatched_mt900_rows: List[Dict] = None) -> Path:
+def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: List[Dict], exception_rows: List[Dict], out_dir: Path, date_start: str = None, date_end: str = None, unmatched_mt900_rows: List[Dict] = None, xlsx_path: Optional[str] = None) -> Path:
     """
     Créer un workbook Excel pour l'analyse des transferts sortants exécutés.
     
     Sheets:
-    - "Transferts_Executes": MT900 matchés avec leurs infos complétées
-    - "MT900_non_rapproches": MT900 sans correspondant MT103/MT202
-    - "Suspens": MT202/MT103 sans confirmation MT900
-    - "Exceptions": MT900 en exception (T2PL, nivellement)
+    - "Transferts_Executes": TOUS les MT900 du flux principal (matchés + non rapprochés),
+      enrichis depuis bic_codes.xlsx via les 4 premiers caractères de related_reference
+      (colonne Reglement) -> code BIC, nom institution, pays.
+    - "Transferts_Executes_Matches": MT900 main rapprochés avec leur MT202/MT103 d'origine.
+    - "MT900_non_rapproches": MT900 sans correspondant MT103/MT202.
+    - "Suspens": MT202/MT103 sans confirmation MT900.
+    - Feuilles d'exception (BEACCMCX091, etc.): MT900 + suspens des catégories d'exception.
     
     Args:
         matched_rows: Liste des MT900 matchés
@@ -1366,13 +1441,194 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
             return date_str
         except Exception:
             return date_str
-    
-    # Sheet 1: Transferts Exécutés (MT900 matchés)
+
+    # Mapping catégorie → titre de feuille (aligné avec create_workbook mode 2)
+    _CATEGORY_TITLES = {
+        "main": "Transferts_Executes",
+        "beaccmcx091": "BEACCMCX091",
+        "exception_323201": "Exceptions_323201",
+        "other_exception": "Autres_Exceptions",
+        "banque_de_france": "BANQUE DE FRANCE",
+        "forex": "forex",
+        "bdf_corr_exception": "Exceptions_Correspondants",
+    }
+
+    # Dispatcher matched & suspens par catégorie
+    matched_by_cat: Dict[str, List[Dict]] = {}
+    suspens_by_cat: Dict[str, List[Dict]] = {}
+    for r in matched_rows:
+        cat = r.get("_category") or "main"
+        matched_by_cat.setdefault(cat, []).append(r)
+    for r in suspens_rows:
+        cat = r.get("_category") or "main"
+        suspens_by_cat.setdefault(cat, []).append(r)
+
+    # Headers utilisés pour les feuilles d'exception (matched + non-matched fusionnés)
+    exc_combined_headers = [
+        "type_MT",
+        "reference",
+        "related_reference",
+        "date_reference",
+        "devise",
+        "montant",
+        "Code du donneur d'ordre",
+        "donneur d'ordre",
+        "Bénéficiaire",
+        "pays_iso3",
+        "correspondant",
+        "Statut MT900",
+        "Message correspondant",
+        "source_pdf",
+    ]
+
+    def _build_message_correspondant(r: Dict) -> Optional[str]:
+        matched_source = r.get("matched_source") or ""
+        matched_type = r.get("matched_type") or ""
+        if matched_source:
+            return f"{matched_type} - {matched_source}" if matched_type else matched_source
+        return None
+
+    def _adjust_widths(sheet, n_cols: int, max_w: int = 60):
+        try:
+            for col_idx in range(1, n_cols + 1):
+                max_len = max(
+                    (len(str(cell.value)) for cell in sheet[get_column_letter(col_idx)] if cell.value is not None),
+                    default=10,
+                )
+                sheet.column_dimensions[get_column_letter(col_idx)].width = min(max_w, max(12, max_len + 2))
+        except Exception:
+            pass
+
+    def _build_exception_sheet(ws, cat: str):
+        """Remplit une feuille d'exception avec MT900 matchés + MT202/MT103 en attente."""
+        ws.append(exc_combined_headers)
+        date_col_idx = 4
+
+        # 1) MT900 matchés de cette catégorie (transfert exécuté)
+        for r in matched_by_cat.get(cat, []):
+            date_ref = _convert_date_to_excel(r.get("date_reference"))
+            ws.append([
+                r.get("type_MT"),
+                r.get("reference"),
+                r.get("related_reference"),
+                date_ref,
+                r.get("devise"),
+                r.get("montant"),
+                r.get("code_donneur_dordre"),
+                r.get("donneur_dordre"),
+                r.get("beneficiaire"),
+                r.get("pays_iso3"),
+                r.get("correspondant"),
+                "Exécuté (MT900 reçu)",
+                _build_message_correspondant(r),
+                r.get("source_pdf"),
+            ])
+            if date_ref and isinstance(date_ref, datetime):
+                ws.cell(row=ws.max_row, column=date_col_idx).number_format = 'DD/MM/YYYY'
+
+        # 2) MT202/MT103 en suspens de cette catégorie (transfert non confirmé)
+        for r in suspens_by_cat.get(cat, []):
+            date_ref = _convert_date_to_excel(r.get("date_reference"))
+            ws.append([
+                r.get("type_MT"),
+                r.get("reference"),
+                None,  # pas de related_reference côté MT202/MT103
+                date_ref,
+                r.get("devise"),
+                r.get("montant"),
+                r.get("code_donneur_dordre"),
+                r.get("donneur_dordre"),
+                r.get("beneficiaire"),
+                r.get("pays_iso3"),
+                r.get("correspondant"),
+                r.get("status") or "En attente MT900",
+                None,
+                r.get("source_pdf"),
+            ])
+            if date_ref and isinstance(date_ref, datetime):
+                ws.cell(row=ws.max_row, column=date_col_idx).number_format = 'DD/MM/YYYY'
+
+        _adjust_widths(ws, len(exc_combined_headers))
+
+    # Sheet 1: Transferts Exécutés — TOUS les MT900 du flux main, enrichis via
+    # les 4 premiers caractères de related_reference -> bic_codes.xlsx (colonne
+    # Reglement). Un MT900 = une preuve d'exécution du transfert, indépendamment
+    # du fait qu'on retrouve ou non son MT202/MT103 d'origine.
+    exec_headers_all = [
+        "type_MT",
+        "reference",
+        "related_reference",
+        "Code Reglement",
+        "date_reference",
+        "devise",
+        "montant",
+        "Code du donneur d'ordre",
+        "donneur d'ordre",
+        "Bénéficiaire",
+        "pays_iso3",
+        "correspondant",
+        "source_pdf",
+    ]
+
+    def _enrich_from_related_reference(r: Dict) -> Dict:
+        """Retourne dict avec code_reglement, code_bic, nom, pays issus du préfixe 4-char."""
+        rr = (r.get("related_reference") or "").strip()
+        code_4 = rr[:4] if len(rr) >= 4 else None
+        info = None
+        if code_4 and code_4.isdigit() and HAS_BIC_UTILS and _bic_utils is not None:
+            try:
+                info = _bic_utils.map_reglement_code(code_4, xlsx_path=xlsx_path)
+            except Exception:
+                info = None
+        return {
+            "code_reglement": code_4,
+            "code_bic": (info or {}).get("bic"),
+            "nom": (info or {}).get("name"),
+            "pays": (info or {}).get("country"),
+        }
+
     exec_sheet = wb.active
     exec_sheet.title = "Transferts_Executes"
-    exec_sheet.append(transfer_headers)
-    
-    for r in matched_rows:
+    exec_sheet.append(exec_headers_all)
+
+    # Tous les MT900 du flux main : matchés + non rapprochés (qu'ils soient
+    # rapprochés ou pas, un MT900 prouve l'exécution effective du transfert).
+    main_mt900_matched = [
+        r for r in matched_by_cat.get("main", [])
+        if (r.get("type_MT") or "").lower() == "fin.900"
+    ]
+    all_main_mt900 = list(main_mt900_matched) + list(unmatched_mt900_rows or [])
+
+    for r in all_main_mt900:
+        date_ref = _convert_date_to_excel(r.get("date_reference"))
+        enr = _enrich_from_related_reference(r)
+        row_data = [
+            r.get("type_MT"),
+            r.get("reference"),
+            r.get("related_reference"),
+            enr["code_reglement"],
+            date_ref,
+            r.get("devise"),
+            r.get("montant"),
+            enr["code_bic"],
+            enr["nom"],
+            r.get("beneficiaire"),
+            enr["pays"],
+            r.get("correspondant"),
+            r.get("source_pdf"),
+        ]
+        exec_sheet.append(row_data)
+        if date_ref and isinstance(date_ref, datetime):
+            exec_sheet.cell(row=exec_sheet.max_row, column=5).number_format = 'DD/MM/YYYY'
+
+    _adjust_widths(exec_sheet, len(exec_headers_all))
+
+    # Sheet 2: Transferts_Executes_Matches — MT900 main rapprochés avec leur 202/103
+    # (correspond au contenu historique de Transferts_Executes).
+    matches_sheet = wb.create_sheet(title="Transferts_Executes_Matches")
+    matches_sheet.append(transfer_headers)
+
+    for r in matched_by_cat.get("main", []):
         date_ref = _convert_date_to_excel(r.get("date_reference"))
         
         # Construire le texte "Message correspondant" à partir des infos de matching
@@ -1400,20 +1656,20 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
             message_correspondant,
             r.get("source_pdf")
         ]
-        exec_sheet.append(row_data)
+        matches_sheet.append(row_data)
         
         if date_ref and isinstance(date_ref, datetime):
-            current_row = exec_sheet.max_row
-            exec_sheet.cell(row=current_row, column=4).number_format = 'DD/MM/YYYY'
+            current_row = matches_sheet.max_row
+            matches_sheet.cell(row=current_row, column=4).number_format = 'DD/MM/YYYY'
     
     # Ajuster largeurs de colonnes
     try:
         for col_idx in range(1, len(transfer_headers) + 1):
             max_len = max(
-                (len(str(cell.value)) for cell in exec_sheet[get_column_letter(col_idx)] if cell.value is not None),
+                (len(str(cell.value)) for cell in matches_sheet[get_column_letter(col_idx)] if cell.value is not None),
                 default=10
             )
-            exec_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
+            matches_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
     except Exception:
         pass
     
@@ -1463,12 +1719,13 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
         except Exception:
             pass
     
-    # Sheet 3: Suspens (MT202/MT103 sans correspondant)
-    if suspens_rows:
+    # Sheet 3: Suspens (MT202/MT103 MAIN sans correspondant)
+    main_suspens = suspens_by_cat.get("main", [])
+    if main_suspens:
         suspens_sheet = wb.create_sheet(title="Suspens")
         suspens_sheet.append(suspens_headers)
         
-        for r in suspens_rows:
+        for r in main_suspens:
             date_ref = _convert_date_to_excel(r.get("date_reference"))
             row_data = [
                 r.get("type_MT"),
@@ -1556,7 +1813,20 @@ def create_transfer_analysis_workbook(matched_rows: List[Dict], suspens_rows: Li
                 exception_sheet.column_dimensions[get_column_letter(col_idx)].width = min(60, max(12, max_len + 2))
         except Exception:
             pass
-    
+
+    # Feuilles dédiées par catégorie d'exception (BEACCMCX091, Exceptions_323201, ...)
+    # Chaque feuille contient les MT900 matchés ET les MT202/MT103 en attente de cette catégorie.
+    for cat_key, sheet_title in _CATEGORY_TITLES.items():
+        if cat_key == "main":
+            continue
+        n_match = len(matched_by_cat.get(cat_key, []))
+        n_susp = len(suspens_by_cat.get(cat_key, []))
+        if n_match == 0 and n_susp == 0:
+            continue
+        ws_cat = wb.create_sheet(title=sheet_title)
+        _build_exception_sheet(ws_cat, cat_key)
+        logger.info("Sheet %s: %d exécutés + %d en attente", sheet_title, n_match, n_susp)
+
     wb.save(out_path)
     logger.info("Transfer analysis workbook created: %s (matched: %d, unmatched_mt900: %d, suspens: %d, exceptions: %d)", 
                 out_path, len(matched_rows), len(unmatched_mt900_rows), len(suspens_rows), len(exception_rows))

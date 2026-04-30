@@ -1387,10 +1387,17 @@ if run_button:
                     date_start_str = date_debut.strftime("%Y-%m-%d") if date_debut else None
                     date_end_str = date_fin.strftime("%Y-%m-%d") if date_fin else None
                     
+                    # Localiser bic_codes.xlsx pour enrichir les MT900 via la
+                    # colonne Reglement (4 premiers caractères de related_reference).
+                    bic_file = ROOT / "data" / "bic_codes.xlsx"
+                    if not bic_file.exists():
+                        bic_file = Path("data/bic_codes.xlsx")
+
                     out_path = create_transfer_analysis_workbook(
                         rows, suspens_rows, exception_mt900_rows, temp_outdir, 
                         date_start=date_start_str, date_end=date_end_str,
-                        unmatched_mt900_rows=unmatched_mt900_rows
+                        unmatched_mt900_rows=unmatched_mt900_rows,
+                        xlsx_path=str(bic_file) if bic_file.exists() else None,
                     )
                     
                     # Afficher le résumé

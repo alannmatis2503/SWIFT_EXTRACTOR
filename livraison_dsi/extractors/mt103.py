@@ -1,29 +1,8 @@
+# backend/app/extractors/mt103.py
 """
-=============================================================================
- Extracteur MT103 — Virements clients
-=============================================================================
- Ce module extrait les données structurées depuis un message SWIFT MT103
- (virement de client à client, initié par une banque pour le compte
- de son client).
-
- Champs SWIFT spécifiques au MT103 :
-   - F20  : Référence de la transaction
-   - F32A : Date valeur + Devise + Montant
-   - F50F/F50K : Donneur d'ordre (client émetteur)
-   - F52A : Institution émettrice (banque du donneur d'ordre)
-   - F59  : Bénéficiaire final (nom + compte)
-   - F70  : Motif du virement (commentaire)
-   - F53A/F54A/F57A : Correspondants intermédiaires
-
- Particularités :
-   - Entrants : le donneur d'ordre est extrait depuis F50K/F50F
-   - Sortants : priorité à F52A, puis codes Trésor/CCF dans F50F
-   - Filtre USD : les MT103 USD transitant par Banque de France
-     ou code FW021083459 sont rejetés (règle métier)
-
- Réutilise les utilitaires de mt202.py (get_field_block, parse_amount, etc.)
- et la résolution BIC de bic_utils.py.
-============================================================================="""
+Extracteur MT103 — wrapper/variant spécifique.
+Uses bic_utils.get_donneur_from_f52 for donor mapping.
+"""
 
 import re
 from pathlib import Path
@@ -389,6 +368,10 @@ def extract_from_text(text: str, source: str = None) -> dict:
     # F54A: Receiver's Correspondent  
     f54a = get_field_block(text, 'F54A')
     row["f54a_raw"] = f54a
+    
+    # F55A: Third Reimbursement Institution
+    f55a = get_field_block(text, 'F55A')
+    row["f55a_raw"] = f55a
     
     # F57A: Account With Institution
     f57a = get_field_block(text, 'F57A')

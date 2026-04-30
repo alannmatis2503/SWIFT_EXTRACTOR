@@ -1,29 +1,10 @@
-# =============================================================================
-# Dépendances Python — PDF SWIFT Extractor
-# =============================================================================
-# Ce fichier liste toutes les bibliothèques tierces nécessaires.
-# Installation : pip install -r requirements.txt
-#
-# Compatibilité : Python 3.10+ (testé avec Python 3.13)
-# =============================================================================
-
-# ── Framework web (interface utilisateur) ───────────────────────────────────
-streamlit==1.52.2          # Interface web interactive (composants, upload, etc.)
-
-# ── Manipulation de données ─────────────────────────────────────────────────
-pandas==2.3.3              # DataFrames pour structurer les données extraites
-
-# ── Génération Excel ────────────────────────────────────────────────────────
-openpyxl==3.1.5            # Lecture/écriture de fichiers Excel (.xlsx)
-
-# ── Extraction de texte depuis PDF ──────────────────────────────────────────
-pdfplumber==0.11.8         # Extraction PDF (fallback, bonne gestion des tableaux)
-pdfminer.six==20251107     # Moteur bas niveau utilisé par pdfplumber
-PyMuPDF>=1.23.0            # Extraction PDF rapide (~50x plus rapide que pdfplumber)
-
-# ── Traitement d'images (dépendance indirecte de PyMuPDF) ──────────────────
-pypdfium2==5.2.0           # Rendu PDF alternatif
-pillow==12.0.0             # Manipulation d'images (PIL)
-
-# ── Utilitaires ─────────────────────────────────────────────────────────────
-python-dateutil==2.9.0.post0  # Parsing flexible de dates (formats variés)
+streamlit==1.52.2
+pandas==2.3.3
+openpyxl==3.1.5
+xlrd>=2.0.1
+pdfplumber==0.11.8
+pdfminer.six==20251107
+pypdfium2==5.2.0
+pillow==12.0.0
+python-dateutil==2.9.0.post0
+PyMuPDF>=1.23.0

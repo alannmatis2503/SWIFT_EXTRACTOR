@@ -1,7 +1,7 @@
 # Guide Technique — PDF SWIFT Extractor
 
-**Version** : 6.0  
-**Date** : 11 mars 2026  
+**Version** : 6.1  
+**Date** : 29 avril 2026  
 **Destinataires** : Direction des Systèmes d'Information (DSI)  
 **Classification** : Document interne — Usage technique
 
@@ -406,9 +406,11 @@ Chaque message extrait est soumis à une série de tests séquentiels qui déter
 |-----------|--------|
 | **Type** | `fin.103` uniquement |
 | **Devise** | `USD` uniquement |
-| **Champs inspectés** | F53A, F54A, F57A |
+| **Champs inspectés** | F53A, F54A, **F55A**, F57A |
 | **Patterns recherchés** | `BANQUE DE FRANCE` ou `FW021083459` |
 | **Action** | Message routé vers `banque_de_france_rows` → onglet **BANQUE DE FRANCE** |
+
+> **Mise à jour 29 avril 2026** : ajout de **F55A** (Third Reimbursement Institution) à la liste des champs inspectés. Le champ est extrait dans `extractors/mt103.py` (`f55a_raw`) et testé par `_should_reject_mt103()` dans `extractors/mt_multi.py`.
 
 ### 10.2 Exception BEACCMCX091 — MT202 sortant
 
@@ -431,6 +433,21 @@ Chaque message extrait est soumis à une série de tests séquentiels qui déter
 | **Pattern** | `BC` dans la référence d'origine |
 | **Action** | Commentaire `"opération salle des marchés"` + message routé vers `other_exceptions_rows` |
 | **Annulation possible** | Oui (voir §11) |
+
+### 10.3 bis Exception BC — MT910 entrant Standard Chartered
+
+| Paramètre | Valeur |
+|-----------|--------|
+| **Type** | `fin.910` |
+| **Direction** | `incoming` uniquement |
+| **Correspondant (sender)** | BIC commençant par `SCBLGB2L` (Standard Chartered Bank) |
+| **Champ inspecté** | F21 (référence d'origine) |
+| **Pattern** | La référence d'origine **se termine** par `BC` (suffixe) |
+| **Commentaire forcé** | `"exception BC"` (concaténé à un commentaire préexistant via ` / ` le cas échéant) |
+| **Action** | Message routé vers `other_exceptions_rows` → onglet **Autres_Exceptions** |
+| **Annulation possible** | Non |
+
+> **Mise à jour 29 avril 2026** : la règle est implémentée dans `extractors/eastnet_extractor.py` (RJE Standard) après la règle forex. Dans le format **PDF**, la même logique était déjà active via la règle salle des marchés historique.
 
 ### 10.4 Exception 323201 (MT202 entrant)
 
@@ -505,6 +522,39 @@ Ces exceptions s'appliquent **uniquement si la devise est EUR**.
 
 > **Priorité** : Cette exception est la dernière évaluée. Elle ne s'applique **que si aucune autre exception n'a été déclenchée** pour ce message.
 
+### 10.10 Exception opérations DN (MT103 entrant CITI USD)
+
+| Paramètre | Valeur |
+|-----------|--------|
+| **Type** | `fin.103` uniquement |
+| **Direction** | `incoming` uniquement |
+| **Devise** | USD (CITIUS33 étant le correspondant USD) |
+| **Correspondant (sender)** | BIC commençant par `CITIUS33` |
+| **Champ inspecté** | Receiver Institution (PDF) ou bloc d'en-tête `{1:F…}` (RJE) |
+| **Condition** | Le BIC11 du Receiver figure dans la **whitelist** des Directions Nationales BEAC ci-dessous |
+| **Commentaire forcé** | `"opérations DN"` |
+| **Action** | Message routé vers `other_exceptions_rows` → onglet **Autres_Exceptions** |
+
+**Whitelist des BIC11 BEAC « Directions Nationales »** (source : feuille `Sheet1` de `bic_codes.xlsx`) :
+
+| BIC11 | Description |
+|-------|-------------|
+| `BEACCMCX100` | BEAC Direction Nationale Cameroun |
+| `BEACCMCX090` | BEAC Services Centraux Yaoundé (≠ DOF) |
+| `BEACGQGQXXX` | BEAC Direction Nationale Guinée Équatoriale |
+| `BEACGALIXXX` | BEAC Direction Nationale Gabon |
+| `BEACCFCFXXX` | BEAC Direction Nationale RCA |
+| `BEACCGCGXXX` | BEAC Direction Nationale Congo |
+| `BEACTDNDXXX` | BEAC Direction Nationale Tchad |
+
+> **Note importante** : la centrale **`BEACCMCX091`** (Services Centraux DOF) est **volontairement exclue** de la whitelist. Un MT103 CITI USD entrant vers `BEACCMCX091` reste un message normal.
+
+**Normalisation BIC11 (RJE)** : le bloc 1 d'un message RJE contient un LT12 (BIC8 + LT_id + branch3, ex. `BEACCMCX0091`). Le helper `_get_block1_bic11()` dans `extractors/eastnet_extractor.py` reconstitue le BIC11 propre = `BIC8 + branch3` (en supprimant le caractère d'identité LT) avant comparaison à la whitelist. Cela évite la confusion historique entre `BEACCMCX091` et `BEACCMCX090`.
+
+**Normalisation BIC11 (PDF)** : le helper `_is_dn_receiver_pdf()` dans `extractors/mt_multi.py` extrait la portion `BEAC...` après la section `Receiver Institution` et applique la même normalisation.
+
+> **Mise à jour 29 avril 2026** : règle introduite suite à la demande métier de classer séparément les transferts CITI USD entrants destinés aux Directions Nationales (par opposition à la centrale DOF).
+
 ---
 
 ## 11. Règles métier — Annulation des exceptions
@@ -548,8 +598,10 @@ Message extrait
     ├─ [2] BEACCMCX091 MT202 ?    → other_exceptions_rows    (onglet Autres_Exceptions)
     │      (après test annulation)
     │
-    ├─ [3] BC dans F21 ?          → other_exceptions_rows    (onglet Autres_Exceptions)
+    ├─ [3] BC dans F21 (MT202 sortant) ?  → other_exceptions_rows  (onglet Autres_Exceptions)
     │      (après test annulation)
+    │
+    ├─ [3'] BC en suffixe F21 (MT910 entrant SCBL) ? → other_exceptions_rows
     │
     ├─ [4] 323201 dans F58A ?     → exception_323201_rows    (onglet Exceptions_323201)
     │
@@ -561,6 +613,8 @@ Message extrait
     ├─ [6] BEACCMCX091 MT910 ?    → beaccmcx091_rows         (onglet BEACCMCX091)
     │
     ├─ [7] Forex MT910 ?          → forex_rows               (onglet forex)
+    │
+    ├─ [7'] Opérations DN (MT103 entrant CITI USD vers DN) ? → other_exceptions_rows
     │
     ├─ [8] Salle marchés IBAN ?   → other_exceptions_rows    (onglet Autres_Exceptions)
     │      (DERNIÈRE priorité)
@@ -619,7 +673,9 @@ Lorsque le correspondant (sender BIC) d'un message **entrant** commence par `CIT
 | **Type** | `fin.202` ou `fin.910` |
 | **Direction** | `incoming` uniquement |
 | **Correspondant** | Doit commencer par `CITIUS33` (8 premiers caractères) |
-| **Déclenchement** | Le code BIC extrait de F52A **n'est pas** trouvé dans `bic_codes.xlsx` |
+| **Déclenchement** | Le code BIC extrait de F52A **n'est pas** trouvé dans `bic_codes.xlsx` **OU** aucun code n'a pu être extrait de F52A |
+
+> **Mise à jour 28 avril 2026** : la garde initiale qui exigeait `code_donneur_dordre` non vide a été retirée. Le fallback F58A s'active désormais aussi quand F52A n'a fourni aucun code exploitable. Pour les fichiers **RJE**, ce fallback est en outre appliqué à **tous** les correspondants (pas seulement CITIUS33), car le post-traitement strict est désactivé en amont (cf. Annexe A.7).
 
 **Logique du fallback F58A/F58D** (par priorité) :
 
@@ -804,6 +860,22 @@ La recherche de doublons s'effectue sur l'ensemble des messages, **toutes listes
 | **Premier** (déjà dans sa liste) | Reste dans sa liste d'origine. Son commentaire est préfixé de `"potentiel doublon"` |
 | **Second** (le doublon détecté) | **Exclu** de la feuille summary. Reste dans l'onglet spécial auquel il appartient, le cas échéant |
 | **Les deux** | Apparaissent ensemble dans l'onglet **Doublons_potentiels** |
+
+### Périmètre du filtre « doublon » dans le workbook
+
+> **Mise à jour 29 avril 2026** : le filtre d'exclusion des « doublons potentiels » s'applique **uniquement** aux feuilles **summary** et aux feuilles **par pays**. Les feuilles d'exception (**BEACCMCX091**, **Exceptions_323201**, **Autres_Exceptions**, **BANQUE DE FRANCE**, **forex**, **Exceptions_Correspondants**) sont désormais **exhaustives** : elles contiennent l'intégralité des messages classés en exception, indépendamment de la présence d'un doublon de référence/montant. Cette correction (commit `cd48ec3`) résout un bug où des MT103/MT202 et leurs MT910 de confirmation, partageant légitimement la même F20, étaient omis des feuilles d'exception.
+
+| Feuille | Filtre doublons appliqué ? |
+|---------|----------------------------|
+| `summary` | ✅ Oui (le second message du couple est exclu) |
+| Feuilles par pays | ✅ Oui |
+| `BEACCMCX091` | ❌ Non (exhaustive) |
+| `Exceptions_323201` | ❌ Non (exhaustive) |
+| `Autres_Exceptions` | ❌ Non (exhaustive) |
+| `BANQUE DE FRANCE` | ❌ Non (exhaustive) |
+| `forex` | ❌ Non (exhaustive) |
+| `Exceptions_Correspondants` | ❌ Non (exhaustive) |
+| `Doublons_potentiels` | ❌ Non (par construction) |
 
 ---
 
@@ -1200,7 +1272,189 @@ Format : `2026-02-23 14:30:05,123 [INFO] Message`
 | MT210 ou MT950 non extraits | Types exclus en mode standard | Normal — seuls MT202/MT103/MT910 sont traités |
 | Messages NAK dans les résultats | Mode entrant (NAK filtré sortant uniquement) | Normal — le filtre NAK n'opère qu'en mode sortant |
 | Doublons inattendus | MT910 et MT202 avec même ref+montant | Vérifier l'onglet Doublons_potentiels |
+| Fichier RJE produit 0 lignes | Tags SWIFT non reconnus | Vérifier que le fichier RJE est bien au format EastNet FIN |
 
 ---
 
-*Document généré le 6 mars 2026 — PDF SWIFT Extractor v5.0*
+## Annexe A — Format RJE EastNet vs PDF vs CSV
+
+### A.1 Analogie simple
+
+| Format | Analogie | Caractéristique |
+|--------|----------|-----------------|
+| **RJE** | Lettre originale dactylographiée | Message SWIFT brut, tags courts (`:52A:`, `:32A:`) |
+| **PDF** | Photocopie imprimée | Même données, labels verbeux (`F52A:`, `F32A:`) |
+| **CSV** | Résumé en tableau | Données sélectionnées, format tabulaire |
+
+### A.2 Structure d'un fichier RJE
+
+Un fichier RJE est une archive texte (encodage EBCDIC ou UTF-8) produite par EastNet, contenant plusieurs messages SWIFT FIN concaténés et séparés par le délimiteur `$` :
+
+```
+{1:F01BEACCMCX0AXXX0000000000}{2:O2021055260428CITIUS33AXXX00000000002604281055N}{3:{103:TGT}}{4:
+:20:C0050146834301
+:21:NONREF
+:32A:260425USD124919,85
+:52A:CITIUS33
+:58A:BEACCMCX0
+-}${1:F01BEACCMCX0AXXX...}...
+```
+
+### A.3 Correspondance visuelle RJE ↔ PDF ↔ CSV
+
+Table de repérage pratique (lecture métier, sans jargon technique) :
+
+| Élément métier | RJE (exemple) | PDF | CSV |
+|---|---|---|---|
+| Référence message | `:20:C0050146834301` | Champ F20 affiché | `Transaction reference` ou `Reference` |
+| Référence origine | `:21:RAP 13.01.2025` | Champ F21 | Souvent absent ou non fiable comme champ dédié |
+| Date, devise, montant | `:32A:250114USD124919,85` | Champ F32A | `Value Date`, `Ccy`, `Amount` |
+| Donneur d'ordre (code/banque) | `:52A:... UNAFCMCX` | F52A/F52D | Généralement absent en détail |
+| Bénéficiaire / institution bénéficiaire | `:58A:... UNAFCMCXXXX` ou `:58D:` | F58A/F58D | Généralement absent en détail |
+| Commentaires métier | `:72:/ACC/... /INS/...` | F72 | Généralement absent |
+| Lignes de relevé MT950 | `:61:...` puis ligne B/O | F61 | Souvent réduit à `Identifier fin.950` + `Amount` |
+| Type de message | Bloc 2 `O202` / `O910` / `O950` + tags | `Identifier fin.202/910/950` | Colonne `Identifier` |
+
+### A.4 Détection de la direction (entrant / sortant)
+
+La direction est lue depuis le **bloc 2** (`{2:...}`) du message SWIFT :
+
+- `{2:I202...}` → **I** = **I**nput = message **sortant** (envoyé par BEAC)
+- `{2:O202...}` → **O** = **O**utput = message **entrant** (reçu par BEAC)
+
+> Cette règle est toujours vraie, quelle que soit la convention utilisée pour nommer les fichiers RJE.
+
+### A.5 Mode d'emploi dans l'application
+
+1. Sélectionner **"📦 Archive EastNet (RJE)"** dans le sélecteur de mode
+2. Choisir le sous-mode :
+    - **Mode 1 RJE** : extraction des messages entrants
+    - **Mode 4 RJE** : rapprochement MT950
+3. Déposer les fichiers RJE demandés par le sous-mode
+4. Cliquer **Lancer l'extraction**
+5. Télécharger le fichier Excel résultat
+
+### A.6 Module technique
+
+| Fichier | Rôle |
+|---|---|
+| `hf_spaces/extractors/eastnet_extractor.py` | Parsing RJE, détection direction, extraction champs |
+| `hf_spaces/extractor_manager.py` | Génération Excel (réutilisé tel quel) |
+| `hf_spaces/test_eastnet.py` | Script de test unitaire |
+
+### A.6bis Règle BEAC stricte F50A + fallback F50A pour MT910 entrants RJE (28 avril 2026)
+
+> **Spécifique aux fichiers RJE.** Cette règle ne s'applique pas au flux PDF.
+
+**Contexte** : sur les MT910 entrants CITI USD au format RJE, F52A est
+fréquemment absent et F52D contient du texte libre non parsable. Le BIC
+du donneur d'ordre se trouve alors en F50A (Ordering Customer). Par
+ailleurs, le tag F25P (Account Identification) contient quasi-systématiquement
+`BEACCMCX091` sur ce flux — il ne peut donc pas servir de critère d'exception
+sans produire des faux positifs.
+
+**Règle (deux temps)** :
+
+1. **Exception BEAC stricte sur F50A** : un MT910 entrant est routé vers la
+   feuille `Exceptions_BEACCMCX091` **uniquement si** `BEACCMCX091` est
+   détecté dans le tag `:50A:` (ou si le `code_donneur_dordre` historique
+   issu de F52A/F52D vaut déjà `BEACCMCX091`). Le tag F25P n'est plus
+   examiné.
+2. **Fallback F50A pour le donneur d'ordre et le pays** : si F50A contient
+   un BIC valide différent de `BEACCMCX091` et que le message n'a pas
+   déjà été enrichi via F52A/F52D, on résout ce BIC dans `bic_codes.xlsx`
+   et l'on remplit (sans écraser) :
+   - `code_donneur_dordre` ← BIC F50A
+   - `donneur_dordre` ← nom de banque (`bic_codes.xlsx`)
+   - `beneficiaire` ← même nom de banque
+   - `pays_iso3` ← pays mappé dans `bic_codes.xlsx`
+
+**Exemples** sur `2026-04-28 10-49-20.rje` (CITI USD entrant) :
+
+| Référence | F50A | F52A | Avant | Après | Donneur final |
+|---|---|---|---|---|---|
+| `F0150130403C01` | `BEACCMCX091` | absent | flux principal | exception BEAC | `YAOUNDE, CAMEROON` |
+| `C0050134391301` | `BEACCMCX091` | absent | flux principal | exception BEAC | (vide) |
+| `C0050144282101` | `BEACCMCX091` | absent | flux principal | exception BEAC | (vide) |
+| `S065013336D801` | absent | `ECOCGALI` | flux principal | flux principal | `ECOBANK GABON` (GAB) |
+| `S065013336D901` | absent | `ECOCGALI` | flux principal | flux principal | `ECOBANK GABON` (GAB) |
+| `S065013336CF01` | absent | `ECOCGALI` | flux principal | flux principal | `ECOBANK GABON` (GAB) |
+| `C0050135966101` | `BGFICGCG` | `BMCEESMM` | flux principal | flux principal (fallback F50A appliqué) | `BGFIBANK CONGO` (CGO) |
+
+**Comparaison avec la version précédente** (28 avril, 1ère tentative qui
+testait aussi F25P) :
+
+| Métrique | V0 (avant) | V1 (F50A+F25P) | V2 (F50A strict + fallback) |
+|---|---|---|---|
+| MT910 entrants en exception BEAC | 0 | 7 | **3** |
+| MT910 entrants au flux principal | 7 | 0 | **4** |
+| MT202 entrants | 44 | 44 | 44 |
+| Faux positif `C0050135966101` (donneur réel BGFI) | flux principal sans donneur | exception (faux positif) | **flux principal avec donneur BGFIBANK CONGO** |
+
+**Implémentation** : `_process_single_message` dans
+`hf_spaces/extractors/eastnet_extractor.py` (étape 9, classification).
+Le fallback s'appuie sur `bic_utils.get_name_for_code` et
+`bic_utils.map_code_to_country`. Aucun impact sur les MT202, les MT910
+sortants, ni sur le pipeline PDF (`mt_multi.py` inchangé).
+
+### A.7 Spécificités du pipeline RJE entrant (MT202)
+
+> **Mise à jour du 28 avril 2026** — Adaptation du pipeline d'extraction pour les MT202 entrants en provenance de fichiers RJE (CITI USD et autres correspondants).
+
+**Différence clé avec le pipeline PDF** : pour les fichiers RJE, le post-traitement strict `_postprocess_row_for_202_103` (calibré pour le texte verbose des PDFs SWIFTRef) est **désactivé**. La fonction `_extract_f52a_donneur` est utilisée seule pour récupérer le donneur d'ordre depuis F52A. Cette fonction :
+
+1. Cherche un BIC standard dans F52A (en ignorant le préfixe `/account`)
+2. Cherche un code à 4 chiffres (sous-participant) → table `Reglement` de `bic_codes.xlsx`
+3. **Préserve le BIC brut** lorsqu'il est trouvé mais non mappé dans le référentiel (au lieu d'effacer le champ comme le faisait le post-traitement)
+
+**Règle de fallback F58A généralisée** : pour TOUS les MT202 entrants RJE (CITIUS33, BdF, autres correspondants), si le BIC F52A n'est pas trouvé dans `bic_codes.xlsx` (ou si F52A est absent), le code recherche dans F58A :
+
+| Priorité | Source | Méthode |
+|:--------:|--------|---------|
+| 1 | F58A/F58D | Code sous-participant à 4 chiffres → table `Reglement` |
+| 2 | F58A/F58D | Code BIC standard → `map_code_to_name` |
+| 3 | F58A/F58D | Code CCF à 4 chiffres → table `CCF` |
+
+Si un mapping est trouvé, il **remplace** le donneur d'ordre extrait de F52A et déclenche `_fill_country_from_code_force` pour mettre à jour le pays.
+
+**Exemples concrets** (fichier `2026-04-28 10-49-20.rje` CITI USD entrant) :
+
+| Référence | F52A brut | F58A brut | Résultat (avant) | Résultat (après) |
+|---|---|---|---|---|
+| `C0050146573901` | `/00151343 SGCMCMCX` | `/1032310108115 SGCMCMCX` | code=∅, donneur=∅, pays=CAM | code=`SGCMCMCX`, donneur=Société Générale Cameroun, pays=CAM |
+| `S065014314E501` | `ABOCCNBJXXX` (non mappé) | `/8414 SCAQCGCG` | code=∅, donneur=∅, pays=∅ | code=`SCAQCGCG`, donneur=Banque Sino Congolaise, pays=CGO |
+| `S0650141C47601` | `BCMAFRPPXXX` (non mappé) | `/8512 UGABGALI` | code=∅, donneur=∅, pays=∅ | code=`UGABGALI`, donneur=Union Gabonaise de Banque, pays=GAB |
+
+**Évolution `_citius33_f58a_fallback` et `_bdf_f58a_fallback` (mt_multi.py)** : la garde initiale `if not code_current: return row` a été retirée. Désormais, le fallback s'active aussi quand aucun BIC n'a pu être extrait de F52A — ce qui peut arriver pour les RJE comme pour les PDFs lorsque le tag F52A est mal formé. Cette modification est **strictement plus permissive** (peut ajouter des codes, jamais en retirer).
+
+**Impact mesuré sur l'échantillon CITI USD du 14/01/2025** (51 MT202 entrants) :
+
+| Métrique | Avant fix | Après fix |
+|---|---|---|
+| Lignes avec `code_donneur_dordre` rempli | ~0 | 48 / 51 |
+| Lignes avec `pays_iso3` rempli | 47 / 51 (via heuristique) | 47 / 51 (via BIC mapping, plus fiable) |
+| Distribution pays | CAM 24, GAB 11, TCH 7, CGO 5, GEQ 5, RCA 3 (heuristique) | CAM 22, GAB 12, TCH 5, CGO 4, GEQ 3, RCA 1, ∅ 4 (BIC réel) |
+
+Les 3 lignes restantes sans donneur ont effectivement ni F52A ni F58A exploitables (F52A absent ou texte libre).
+
+### A.8 Explication non technique: pourquoi RJE est plus adapté ici
+
+En version simple:
+
+- Le **RJE** est la source la plus proche du message bancaire d'origine. C'est le format "brut" produit par le système de messagerie.
+- Le **PDF** est une mise en page pour lecture humaine. Il reste utile, mais certaines informations peuvent être tronquées, déplacées ou moins régulières.
+- Le **CSV** est un résumé pratique, mais il ne contient pas toujours le niveau de détail nécessaire pour les contrôles métiers (donneur d'ordre, bénéficiaire, commentaires, détails MT950).
+
+Dans ce projet, nous avons besoin de contrôles fins (routage, exceptions, rapprochement MT950). Pour ce besoin, le RJE donne la meilleure fiabilité car il conserve les champs complets.
+
+Image mentale:
+
+- **RJE** = original signé
+- **PDF** = photocopie
+- **CSV** = fiche récapitulative
+
+Pour vérifier un point sensible, on préfère toujours l'original.
+
+---
+
+*Document généré le 6 mars 2026 — PDF SWIFT Extractor v5.0 — Annexe A ajoutée le 28 avril 2026 (sections A.7 fallback F58A généralisé pour RJE entrants)*

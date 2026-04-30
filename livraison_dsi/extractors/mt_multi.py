@@ -378,6 +378,53 @@ def _extract_receiver_bic(block_text: str) -> Optional[str]:
     return None
 
 
+# Section "Receiver:" pour la règle 'opérations DN' (CITI USD entrants)
+_RECEIVER_SECTION_RE = re.compile(r'(?i)Receiver(?:\s+Institution)?\s*[:\s]*(.{0,250})', re.DOTALL)
+
+# Liste hardcodée des BIC11 des Directions Nationales BEAC (source : bic_codes.xlsx,
+# feuille Sheet1). Un MT103 entrant CITI USD dont le Receiver est l'un de ces BIC
+# est considéré comme une opération DN et route vers autres_exceptions.
+# La centrale BEACCMCX091 (Services Centraux DOF) est volontairement exclue.
+_BEAC_DN_BIC11 = frozenset({
+    'BEACCMCX100',  # BEAC Direction Nationale Cameroun
+    'BEACCMCX090',  # BEAC Services Centraux Yaoundé (≠ DOF)
+    'BEACGQGQXXX',  # BEAC Direction Nationale Guinée Équatoriale
+    'BEACGALIXXX',  # BEAC Direction Nationale Gabon
+    'BEACCFCFXXX',  # BEAC Direction Nationale RCA
+    'BEACCGCGXXX',  # BEAC Direction Nationale Congo
+    'BEACTDNDXXX',  # BEAC Direction Nationale Tchad
+})
+
+
+def _is_dn_receiver_pdf(block_text: str) -> bool:
+    """
+    Pour CITI USD entrants (PDF) : True si le Receiver Institution est un LT BEAC
+    figurant dans la whitelist `_BEAC_DN_BIC11`. Le bloc d'en-tête peut contenir
+    un LT 12-char (BIC8 + LT_id + branch3) ; on le normalise en BIC11 = BIC8 + branch3
+    avant de comparer.
+    """
+    if not block_text:
+        return False
+    m = _RECEIVER_SECTION_RE.search(block_text)
+    if not m:
+        return False
+    seg = m.group(1).upper()
+    # Capturer le LT BEAC (4 à 8 chars après 'BEAC')
+    bm = re.search(r'\bBEAC([A-Z0-9]{4,8})\b', seg)
+    if not bm:
+        return False
+    lt = 'BEAC' + bm.group(1)
+    if len(lt) == 12:
+        bic11 = lt[:8] + lt[9:12]
+    elif len(lt) == 11:
+        bic11 = lt
+    elif len(lt) == 8:
+        bic11 = lt + 'XXX'
+    else:
+        bic11 = lt[:11]
+    return bic11 in _BEAC_DN_BIC11
+
+
 def _check_f58a_323201(block_text: str) -> bool:
     """
     Vérifier si le champ F58A contient la séquence 323201.
@@ -413,17 +460,16 @@ def _citius33_f58a_fallback(row: Dict, block_text: str, xlsx_path: Optional[str]
 
     code_current = row.get("code_donneur_dordre")
 
-    # Le fallback ne s'applique que si F52A a fourni un code NON mappé.
-    # Si aucun code n'a été trouvé du tout, on ne tente pas F58A.
-    if not code_current:
-        return row
-
-    # Vérifier que le code F52A actuel n'est PAS mappé dans bic_codes.xlsx
-    # (si déjà mappé, pas besoin de fallback)
-    name_from_mapping = bic_utils.map_code_to_name(code_current, xlsx_path=xlsx_path)
-    if name_from_mapping:
-        # Code déjà résolu → pas de fallback nécessaire
-        return row
+    # Le fallback s'applique :
+    #  - Si F52A a fourni un code NON mappé dans bic_codes.xlsx, OU
+    #  - Si aucun code n'a pu être extrait de F52A (cas fréquent en RJE quand
+    #    le post-traitement strict a tout effacé, ou quand F52A est absent)
+    if code_current:
+        name_from_mapping = bic_utils.map_code_to_name(code_current, xlsx_path=xlsx_path)
+        if name_from_mapping:
+            # Code déjà résolu → pas de fallback nécessaire
+            return row
+    # else: code_current vide/None → on tente quand même F58A
 
     # Récupérer le bloc F58A
     f58a_block = get_field_block(block_text, 'F58A')
@@ -516,14 +562,14 @@ def _bdf_f58a_fallback(row: Dict, block_text: str, xlsx_path: Optional[str] = No
 
     code_current = row.get("code_donneur_dordre")
 
-    # Le fallback ne s'applique que si F52A a fourni un code NON mappé.
-    if not code_current:
-        return row
-
-    # Vérifier que le code F52A actuel n'est PAS mappé dans bic_codes.xlsx
-    name_from_mapping = bic_utils.map_code_to_name(code_current, xlsx_path=xlsx_path)
-    if name_from_mapping:
-        return row  # Déjà résolu, pas de fallback
+    # Le fallback s'applique :
+    #  - Si F52A a fourni un code NON mappé dans bic_codes.xlsx, OU
+    #  - Si aucun code n'a pu être extrait de F52A.
+    if code_current:
+        name_from_mapping = bic_utils.map_code_to_name(code_current, xlsx_path=xlsx_path)
+        if name_from_mapping:
+            return row  # Déjà résolu, pas de fallback
+    # else: tenter F58A quand même
 
     # Récupérer le bloc F58A
     f58a_block = get_field_block(block_text, 'F58A')
@@ -725,9 +771,10 @@ def _check_salle_des_marches_exception(row: Dict, block_text: str, direction: st
 
 def _should_reject_mt103(row: Dict) -> bool:
     """
-    RÈGLE 3: Pour MT103 en USD, rejeter si F53A, F54A ou F57A contient:
+    RÈGLE 3: Pour MT103 en USD, rejeter si F53A, F54A, F55A ou F57A contient:
     - "BANQUE DE FRANCE"
     - "FW021083459"
+    - BIC "BDFEFRPPXXX", "BDFEFRPPSRD" ou "BDFEFRPPCCT"
     """
     if not row or not row.get("type_MT"):
         return False
@@ -740,8 +787,11 @@ def _should_reject_mt103(row: Dict) -> bool:
     if not devise or devise.upper() != "USD":
         return False  # Ne rejeter que les messages en USD
     
-    forbidden_patterns = ["BANQUE DE FRANCE", "FW021083459"]
-    fields_to_check = ["f53a_raw", "f54a_raw", "f57a_raw"]
+    forbidden_patterns = [
+        "BANQUE DE FRANCE", "FW021083459",
+        "BDFEFRPPXXX", "BDFEFRPPSRD", "BDFEFRPPCCT",
+    ]
+    fields_to_check = ["f53a_raw", "f54a_raw", "f55a_raw", "f57a_raw"]
     
     for field_name in fields_to_check:
         field_value = row.get(field_name)
@@ -1775,6 +1825,21 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
                 row["commentaires"] = bdf_exc_comment
                 is_bdf_corr_exception = True
 
+        # RÈGLE "opérations DN" : MT103 CITI USD entrants vers une LT BEAC DN
+        # → routage en autres_exceptions avec commentaire 'opérations DN'.
+        # Le correspondant pour les entrants = sender_bic (institution émettrice).
+        is_dn_exception = False
+        if (
+            direction == "incoming"
+            and mt_type and mt_type.startswith("fin.103")
+            and (row.get("correspondant") or "").upper().startswith("CITIUS33")
+            and _is_dn_receiver_pdf(blk)
+        ):
+            logger.debug("mt_multi: Message %s identifié comme opération DN (Receiver BEAC dans whitelist)", source_label)
+            existing = row.get("commentaires")
+            row["commentaires"] = f"{existing} / opérations DN" if existing else "opérations DN"
+            is_dn_exception = True
+
         # Post-traitement: remplir pays_iso3 depuis code_donneur_dordre si absent
         row = _fill_country_from_code(row, xlsx_path=bic_xlsx)
 
@@ -1808,6 +1873,8 @@ def extract_messages_from_pdf(pdf_path: Path, bic_xlsx: Optional[str] = None, di
         elif is_exception_323201:
             exception_323201_rows.append(row)
         elif is_eur_exception or is_nivellement_exception:
+            other_exceptions_rows.append(row)
+        elif is_dn_exception:
             other_exceptions_rows.append(row)
         elif is_beaccmcx091:
             beaccmcx091_rows.append(row)

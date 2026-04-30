@@ -1,32 +1,16 @@
+# backend/app/extractors/mt910.py
 """
-=============================================================================
- Extracteur MT910 — Confirmations de crédit
-=============================================================================
- Ce module extrait les données structurées depuis un message SWIFT MT910
- (confirmation qu'un crédit a été porté au compte d'une institution).
-
- Champs SWIFT spécifiques au MT910 :
-   - F20  : Référence de la transaction
-   - F21  : Référence liée (lien avec le message d'origine)
-   - F25P : Numéro de compte
-   - F32A : Date valeur + Devise + Montant
-   - F52A : Institution du donneur d'ordre
-
- Règles métier spécifiques :
-   - Le donneur d'ordre (sender) et le bénéficiaire (receiver) sont
-     identiques pour un MT910 (la banque confirme un crédit sur son
-     propre compte)
-   - Les codes BIC à 11 caractères sont extraits depuis les blocs
-     « Sender Institution » et « Receiver Institution » de l'en-tête
-   - Le nom de l'institution est recherché dans le champ « Expansion: »
-   - Les MT910 avec NIVLT dans la référence ou 5175 dans F25P sont
-     classés en exception « nivellement »
-   - Les MT910 avec BEACCMCX091 sont stockés séparément
-
- Dépendances :
-   - Réutilise les utilitaires de mt202.py
-   - PyMuPDF/pdfplumber pour l'extraction texte
-============================================================================="""
+Extractor for SWIFT-like MT910 (confirmations/report outputs).
+Rules (as requested):
+ - For MT910, donor = sender, beneficiary = receiver.
+ - Do NOT consult external BIC mapping for MT910.
+ - Extract sender code (exactly 11 chars, A-Z0-9) from Sender Institution block.
+ - Extract receiver code (exactly 11 chars) from Receiver Institution block.
+ - Extract expansion name from "Expansion:" if present (same block) and produce "[CODE]/[NAME]".
+ - If name missing, fall back to a readable line from the block.
+ - Always set sender_bic and receiver_bic to the raw 11-char code (if found).
+ - Ensure reference extraction still uses header "Transaction Reference" or block4 :20:.
+"""
 
 import re
 from pathlib import Path
