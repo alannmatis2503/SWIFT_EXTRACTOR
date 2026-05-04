@@ -1316,7 +1316,26 @@ def match_mt900_with_transfers(mt900_rows: List[Dict], transfer_rows: List[Dict]
         # Souveraineté (BDF) : F21 contient "SOUV" (typiquement SOUVxxxxxxxxxxx)
         if "SOUV" in related_ref_upper:
             return "souverainete"
-        
+
+        # Informations supplémentaires (F72) normalisées : suppression des
+        # séparateurs de continuation '//' et passage en majuscules pour
+        # gérer les coupures de ligne ("REGUL PLACEMENT TIER 2 - 9 AU 11/ 12").
+        info_72 = (row.get("info_72") or "").upper().replace("//", " ")
+
+        # Placement (BDF) : :72: contient "REGUL PLACEMENT"
+        # (régularisations de placements TIER 2/3, ex AOPOD25346014162)
+        if "REGUL PLACEMENT" in info_72:
+            return "placement"
+
+        # TOPAZE (BDF) : F21 commence par "TOPAZE" OU :72: contient "TOPAZE"
+        if related_ref_upper.startswith("TOPAZE") or "TOPAZE" in info_72:
+            return "topaze"
+
+        # Retour pour duplication (BDF) : F21 commence par "P/"
+        # (ex AOPVI25339025526, F21=P/BOTRF002508098, :72:=RETURN YREF DUPLICATION)
+        if related_ref_upper.startswith("P/"):
+            return "retour duplication"
+
         return None
     
     # Créer un index des MT103/MT202 par référence pour le matching rapide

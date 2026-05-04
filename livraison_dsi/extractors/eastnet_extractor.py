@@ -1413,6 +1413,10 @@ def _extract_mt900_from_tags(tags: Dict[str, str], source_label: str,
     row['reference'] = (tags.get('20') or '').strip().upper() or None
     row['related_reference'] = (tags.get('21') or '').strip().upper() or None
 
+    # F72 brut (informations supplémentaires) — utilisé pour la classification
+    # des exceptions MT900 (placement, topaze, etc.)
+    row['info_72'] = (tags.get('72') or '').strip() or None
+
     f32_data = _parse_32a(tags.get('32A', ''))
     row.update(f32_data)
 
