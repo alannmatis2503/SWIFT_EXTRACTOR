@@ -319,11 +319,20 @@ def _check_f21_bc_mt202_outgoing(block_text: str) -> bool:
     """
     Pour les MT202 sortants: vérifier si « BC » est dans le champ F21 (référence d'origine).
     Retourne True si trouvé (message à mettre en exception avec commentaire 'opération salle des marchés').
+
+    Exclusions explicites : certains tokens contiennent « BC » sans correspondre
+    à la règle métier (ex. « CRBC » observé sur la référence 9901/064/CRBC/25).
+    On retire ces tokens avant le test substring afin de ne pas casser les cas
+    légitimes où « BC » est précédé de chiffres (ex. « 01BC », « 123BC »).
     """
     ref_origine = _extract_f21_reference_origine(block_text)
     if not ref_origine:
         return False
-    return 'BC' in ref_origine.upper()
+    ref_up = ref_origine.upper()
+    EXCLUDED_TOKENS = ('CRBC',)
+    for tok in EXCLUDED_TOKENS:
+        ref_up = ref_up.replace(tok, '')
+    return 'BC' in ref_up
 
 
 def _extract_donneur_from_f50f_details(block_text: str) -> Optional[str]:
