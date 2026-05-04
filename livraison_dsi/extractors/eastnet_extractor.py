@@ -1732,13 +1732,17 @@ def _process_single_message(msg_text: str, source_file: str, msg_idx: int,
                         )
                         return row, direction, 'forex'
 
-    # ── Règle "exception BC" (MT910 entrants Standard) ──
-    # Pour les MT910 entrants depuis Standard Chartered (SCBLGB2LXXX), si la
-    # référence d'origine (F21) se termine par "BC", router en autres_exceptions.
+        # ── Règle "exception BC" (MT910 entrants Standard + BDF) ──
+        # Pour les MT910 entrants depuis Standard Chartered (SCBLGB2LXXX) ou BDF
+        # (BDFEFRPPXXX), si la référence d'origine (F21) se termine par "BC",
+        # router en autres_exceptions.
     if (
         mt_type == '910'
         and direction == 'incoming'
-        and (correspondant or '').upper().startswith('SCBLGB2L')
+            and (
+                (correspondant or '').upper().startswith('SCBLGB2L')
+                or (correspondant or '').upper().startswith('BDFEFRPP')
+            )
     ):
         ref_orig = (row.get('reference_origine') or '').strip().upper()
         if ref_orig.endswith('BC'):
