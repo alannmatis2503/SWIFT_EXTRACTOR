@@ -277,6 +277,27 @@ elif direction == "eastnet_extraction":
         uploaded_rje_mt950_files = None
         uploaded_rje_msg_files = None
         mt950_sub_mode = "entrants"
+
+        # CSV companion EastNets — pour CITI USD / BDF en mode 3, filtrer
+        # les MT202/MT103 initiés au Nack avant matching contre les MT900.
+        # Sans ce filtre, un sortant Nack'd remonterait à tort en « Suspens ».
+        uploaded_eastnet_csv_files = None
+        if rje_correspondant in ("CITIUS33XXX", "BDFEFRPPXXX"):
+            st.markdown("#### 📎 CSV companion EastNets (filtre Nt.Status)")
+            st.caption(
+                "Pour CITI USD et BDF, joignez le CSV exporté depuis EastNets "
+                "(mêmes dates que le RJE sortant). Seuls les MT202/MT103 avec "
+                "**Nt.Status = 'Network Ack'** seront utilisés pour le matching MT900. "
+                "Les autres (Nack, '-', absents du CSV) iront dans la feuille "
+                "« Sortants_Rejetes_NtStatus » et ne pollueront pas la feuille « Suspens »."
+            )
+            uploaded_eastnet_csv_files = st.file_uploader(
+                "Déposez le(s) CSV EastNets companion",
+                type=["csv"],
+                accept_multiple_files=True,
+                help="Export EastNets : colonnes IO, Reference, Identifier, Status, Nt.Status, ...",
+                key=f"eastnet_csv_uploader_mode3{uploader_suffix}",
+            )
     else:
         mt950_sub_mode = st.radio(
             "Sous-mode de rapprochement",
@@ -1047,6 +1068,57 @@ if run_button:
                             + _tag(_new_bdf_corr, "bdf_corr_exception")
                         )
 
+                        # 1bis) Filtre Nt.Status (CITI USD / BDF) — écarte les
+                        # MT202/MT103 Nack'd / non acquittés du réseau avant
+                        # matching MT900 (sinon ils remonteraient à tort en
+                        # « Suspens »).
+                        nt_rejected_rows_m3 = []
+                        if (
+                            rje_correspondant in ("CITIUS33XXX", "BDFEFRPPXXX")
+                            and uploaded_eastnet_csv_files
+                        ):
+                            try:
+                                from extractors.eastnet_extractor import (
+                                    parse_eastnet_companion_csv,
+                                    filter_outgoing_by_nt_status,
+                                )
+                                csv_index_m3 = {}
+                                for cf in uploaded_eastnet_csv_files:
+                                    try:
+                                        tmp_csv = save_uploaded_to_temp(cf)
+                                        tmp_dirs.append(tmp_csv.parent)
+                                        csv_index_m3.update(parse_eastnet_companion_csv(tmp_csv))
+                                    except Exception as _e_csv:
+                                        st.warning(f"⚠️ CSV {cf.name} ignoré : {_e_csv}")
+                                if csv_index_m3:
+                                    _kept_m3, _rej_m3 = filter_outgoing_by_nt_status(
+                                        all_transfers, csv_index_m3
+                                    )
+                                    all_transfers = _kept_m3
+                                    nt_rejected_rows_m3 = _rej_m3
+                                    if _rej_m3:
+                                        st.warning(
+                                            f"🚫 Filtre Nt.Status : {len(_rej_m3)} sortant(s) "
+                                            f"écarté(s) avant matching MT900 (Nack / non acquittés "
+                                            f"/ absents du CSV) — voir feuille « Sortants_Rejetes_NtStatus »."
+                                        )
+                                    st.info(
+                                        f"✅ Filtre Nt.Status appliqué : {len(_kept_m3)} sortant(s) "
+                                        f"conservé(s) sur {len(_kept_m3) + len(_rej_m3)}"
+                                    )
+                            except Exception as _e_filter:
+                                tb = traceback.format_exc()
+                                errors.append(("Filtre Nt.Status mode 3 (CSV EastNets)", str(_e_filter)))
+                                st.error(f"❌ Erreur filtre Nt.Status mode 3 : {_e_filter}")
+                                with st.expander("Détails de l'erreur (filtre Nt.Status mode 3)"):
+                                    st.code(tb)
+                        elif rje_correspondant in ("CITIUS33XXX", "BDFEFRPPXXX"):
+                            st.info(
+                                "ℹ️ Aucun CSV EastNets companion fourni : le filtre Nt.Status "
+                                "n'est pas appliqué. Les sortants Nack'd pourraient remonter en suspens."
+                            )
+                        st.session_state['nt_status_rejected_rows'] = nt_rejected_rows_m3
+
                         # 2) Extraire tous les MT900
                         all_mt900 = _ee_mt900_extract(
                             tmp_mt900_paths, correspondant=rje_correspondant,
@@ -1520,6 +1592,7 @@ if run_button:
                         unmatched_mt900_rows=unmatched_mt900_rows,
                         xlsx_path=str(bic_file) if bic_file.exists() else None,
                         duplicate_mt900_rows=duplicate_mt900_rows,
+                        nt_status_rejected_rows=st.session_state.get('nt_status_rejected_rows', []) or None,
                     )
                     
                     # Afficher le résumé

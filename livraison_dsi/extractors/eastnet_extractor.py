@@ -1786,7 +1786,7 @@ def _process_single_message(msg_text: str, source_file: str, msg_idx: int,
 #   - Désactivé si EASTNET_NO_PARALLEL=1 (variable d'environnement)
 #   - Nombre de workers : min(cpu_count - 1, 8) ou EASTNET_PARALLEL_WORKERS
 
-_EASTNET_PARALLEL_THRESHOLD = int(os.environ.get("EASTNET_PARALLEL_THRESHOLD", "2000"))
+_EASTNET_PARALLEL_THRESHOLD = int(os.environ.get("EASTNET_PARALLEL_THRESHOLD", "500"))
 _EASTNET_PARALLEL_DISABLED = os.environ.get("EASTNET_NO_PARALLEL") == "1"
 
 
